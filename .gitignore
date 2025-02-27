@@ -16,9 +16,62 @@ lib64/
 parts/
 sdist/
 var/
+wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
+
+# PyTorch - ALL model weights (no exceptions)
+*.pth
+*.pt
+*.bin
+*.onnx
+*.ckpt
+*.safetensors
+*.h5
+
+# Explicit model directory exclusions
+models/
+*/models/
+*/*/models/
+*/checkpoints/
+*/*/checkpoints/
+*/*/*/checkpoints/
+
+# Environment variables
+.env
+.env.local
+
+# Results and temporary files
+results/
+test_results/
+_temp_resources/
+
+# PyCharm
+.idea/
+.idea_modules/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+logs/
+.gradio/
+
+# Discord bot specific
+.discord_cache/
 
 # Virtual Environment
 venv/
@@ -26,27 +79,6 @@ ENV/
 env/
 .env
 
-# IDE files
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Project specific
-results/
-cache/
-models/*.pth
-models/*.onnx
-_temp_resources/
+# Temporary files
 .tmp/
-
-# Logs
-*.log
-
-# Environment variables and secrets
-.env.local
-
-# Large model weights
-Depth-Anything-V2/checkpoints/*.pth
-depth_anything_v2/checkpoints/*.pth
-*.pth 
+cache/ 

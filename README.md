@@ -1,19 +1,19 @@
-# stereOgram SBS3D converter
+# Stereo3D Discord Bot
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)](https://pytorch.org/)
+[![Discord.py](https://img.shields.io/badge/discord.py-2.3.0+-blue.svg)](https://discordpy.readthedocs.io/)
 
-A tool that converts regular 2D images into stereogram 3D formats (anaglyph and side-by-side) using depth estimation with Depth Anything V2.
+A Discord bot that converts regular 2D images into stereogram 3D formats (side-by-side) using depth estimation with Depth Anything V2.
 
 ## Features
 
 - **High-quality depth estimation** using Depth Anything V2
-- Generation of **anaglyph (red-cyan) 3D images**
 - Generation of **side-by-side 3D images** for VR/AR viewers
 - **Wiggle GIF animation** for glasses-free 3D viewing
 - **Advanced hole filling** for parallax gaps using AI-based inpainting
-- **Discord bot integration** for easy sharing and conversion through Discord
+- **Discord bot integration** for easy conversion through Discord
 - Preserves original pixels for highest quality results
 - Supports various resolutions and quality settings
 
@@ -25,13 +25,14 @@ A tool that converts regular 2D images into stereogram 3D formats (anaglyph and 
 
 - Python 3.8+
 - CUDA-compatible GPU recommended (8GB+ VRAM)
+- Discord Bot Token
 
 ## Installation
 
 1. Clone this repository:
    ```
-   git clone https://github.com/CucumberWorks/stereOgram_SBS3D_Converter.git
-   cd stereOgram_SBS3D_Converter
+   git clone https://github.com/yourusername/Stereo3D-Discord-Bot.git
+   cd Stereo3D-Discord-Bot
    ```
 
 2. Install the required dependencies:
@@ -39,7 +40,14 @@ A tool that converts regular 2D images into stereogram 3D formats (anaglyph and 
    pip install -r requirements.txt
    ```
 
-3. Model weights:
+3. Create a `.env` file in the root directory with your Discord bot token:
+   ```
+   DISCORD_BOT_TOKEN=your_discord_bot_token_here
+   ```
+
+4. Model weights:
+   
+   > **Important Note:** Model weights are NOT included in this repository as they are too large for GitHub. They will be automatically downloaded the first time you run the bot.
    
    The application will automatically download the required model weights when you first run it. However, if you're in an offline environment or prefer to download them manually, follow these steps:
    
@@ -59,83 +67,63 @@ A tool that converts regular 2D images into stereogram 3D formats (anaglyph and 
    # For ViT-L (Large) model - most accurate but requires more VRAM
    curl -L https://huggingface.co/depth-anything/Depth-Anything-V2-Large/resolve/main/depth_anything_v2_vitl.pth -o models/depth_anything_v2_vitl.pth
    ```
+   
+   c. Model file sizes (for reference):
+   - ViT-S: ~47 MB
+   - ViT-B: ~376 MB
+   - ViT-L: ~1.17 GB
 
 ## Usage
 
-Run the demo script to process sample images:
-
-```bash
-python test_with_demo.py
-```
-
-Or use the graphical interface for easier operation:
-
-```bash
-python gradio_interface.py
-```
-
-Alternatively, you can run the batch files (Windows only):
-- `run_stereogram_sbs3d.bat` - Command-line version
-- `run_stereogram_sbs3d_gui.bat` - Graphical interface version (recommended)
-
-### Command-line options:
-
-```bash
-python test_with_demo.py [OPTIONS]
-```
-
-Options:
-- `--medium-memory`: Use medium memory mode (recommended for most GPUs)
-- `--low-memory`: Use low memory mode (for GPUs with limited VRAM)
-- `--resolution=2160`: Set output resolution (720, 1080, 1440, 2160)
-- `--patch-size=384`: Set patch size for inpainting (larger values = better quality, more VRAM)
-- `--patch-overlap=128`: Set patch overlap for inpainting (larger values = better blending)
-- `--steps=30`: Set number of inference steps for inpainting (more = better quality, slower)
-- `--high-quality`: Enable high quality mode (better but slower processing)
-- `--debug`: Enable debug mode with purple background to visualize holes
-
-Example:
-```bash
-python test_with_demo.py --medium-memory --resolution=2160 --patch-size=384 --patch-overlap=128 --steps=30 --high-quality
-```
-
-## Interface Options
-
-### Graphical User Interface
-
-The Gradio web interface provides an easy-to-use GUI for converting images:
-
-```bash
-python gradio_interface.py
-```
-
 ### Discord Bot
 
-A Discord bot is available for converting images directly within Discord:
+Run the Discord bot using:
 
 ```bash
 python discord_stereo_bot.py
 ```
 
-Key features of the Discord bot:
-- Convert images with a simple `!sbs` command
-- Automatic depth map generation and 3D conversion
-- Produces side-by-side 3D images, depth maps, and wiggle GIFs
-- Optimized for Discord's file size limits
-- Works with image attachments or replies
+Or use the convenience batch file (Windows only):
 
-See the [Discord Bot Guide](DISCORD_BOT_README.md) for complete setup and usage instructions.
+```bash
+run_discord_bot.bat
+```
 
-## Adding your own images
+### Discord Bot Commands
 
-Place your images in the `demo_images` folder, and they will be automatically processed.
-Results will be saved in the `results` folder.
+- `!sbs` - Convert an attached image to SBS 3D format
+- Use this command when replying to a message with an image or attach an image to your message
 
-## Changing the depth model
+## Debugging
 
-The tool currently uses the Depth Anything V2 model. You can choose between three model variants:
+If you encounter issues, refer to the [Debugging Guide](docs/DEBUGGING_GUIDE.md) for troubleshooting steps.
+
+## Configuration Options
+
+The Discord bot can be configured by modifying parameters in the `discord_stereo_bot.py` file:
+
+```python
+converter = StereogramSBS3DConverter(
+    use_advanced_infill=True,
+    depth_model_type="depth_anything_v2",
+    model_size="vits",  # Using smaller model for Discord bot (options: vits, vitb, vitl)
+    max_resolution=4096,  # Limit resolution to avoid Discord payload issues
+    low_memory_mode=True  # Use low memory processing
+)
+```
+
+### Model Size Options:
+
 - **ViT-S** (smallest/fastest) - For systems with limited resources, good for Discord bots
 - **ViT-B** (medium/balanced) - Good for most systems, balances quality and speed
 - **ViT-L** (largest/best quality) - For high-end systems with plenty of RAM and VRAM
 
-In the GUI, you can select the model size in the "Initialize" tab. The graphical interface defaults to Low Memory Mode for better compatibility with all GPUs.
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- [Depth Anything V2](https://github.com/depth-anything/depth-anything) for the depth estimation model
+- [Discord.py](https://github.com/Rapptz/discord.py) for the Discord bot framework
+- [Diffusers](https://github.com/huggingface/diffusers) for the inpainting model
