@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.env
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+results/
+cache/
+models/*.pth
+models/*.onnx
+_temp_resources/
+.tmp/
+
+# Logs
+*.log
+
+# Environment variables and secrets
+.env.local
+
+# Large model weights
+Depth-Anything-V2/checkpoints/*.pth
+depth_anything_v2/checkpoints/*.pth
+*.pth 
