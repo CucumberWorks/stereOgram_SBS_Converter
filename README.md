@@ -36,6 +36,7 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
    cd stereOgram_SBS_Converter
    ```
 
+
 2. Install the required dependencies:
    ```
    pip install -r requirements.txt
