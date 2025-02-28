@@ -1,15 +1,16 @@
-# Stereo3D Discord Bot
+# stereOgram SBS Converter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)](https://pytorch.org/)
 [![Discord.py](https://img.shields.io/badge/discord.py-2.3.0+-blue.svg)](https://discordpy.readthedocs.io/)
 
-A Discord bot that converts regular 2D images into stereogram 3D formats (side-by-side) using depth estimation with Depth Anything V2.
+A tool that converts regular 2D images into stereogram 3D formats (side-by-side) using depth estimation with Depth Anything V2. Includes both a user-friendly GUI and a Discord bot interface.
 
 ## Features
 
 - **High-quality depth estimation** using Depth Anything V2
+- **User-friendly web GUI** for easy image conversion
 - Generation of **side-by-side 3D images** for VR/AR viewers
 - **Wiggle GIF animation** for glasses-free 3D viewing
 - **Advanced hole filling** for parallax gaps using AI-based inpainting
@@ -31,8 +32,8 @@ A Discord bot that converts regular 2D images into stereogram 3D formats (side-b
 
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/Stereo3D-Discord-Bot.git
-   cd Stereo3D-Discord-Bot
+   git clone https://github.com/yourusername/stereOgram_SBS_Converter.git
+   cd stereOgram_SBS_Converter
    ```
 
 2. Install the required dependencies:
@@ -74,6 +75,26 @@ A Discord bot that converts regular 2D images into stereogram 3D formats (side-b
    - ViT-L: ~1.17 GB
 
 ## Usage
+
+### GUI Interface
+
+Run the GUI interface using:
+
+```bash
+python gradio_interface.py
+```
+
+Or use the convenience batch file (Windows only):
+
+```bash
+run_stereogram_sbs3d_gui.bat
+```
+
+The GUI provides an intuitive web interface with the following features:
+- Initialize tab for selecting model size and settings
+- Image upload and processing options
+- Advanced settings for fine-tuning the conversion
+- Multiple output formats including SBS 3D and wiggle GIF
 
 ### Discord Bot
 
