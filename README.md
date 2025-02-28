@@ -32,7 +32,7 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
 
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/stereOgram_SBS_Converter.git
+   git clone https://github.com/CucumberWorks/stereOgram_SBS_Converter.git
    cd stereOgram_SBS_Converter
    ```
 
