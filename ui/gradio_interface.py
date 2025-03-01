@@ -658,10 +658,10 @@ def process_image(image, shift_factor, resolution, patch_size, patch_overlap, st
     global converter, stored_depth_map, stored_depth_colored
     
     if converter is None:
-        return None, None, None, None, None, "Converter not initialized. Please initialize first."
+        return None, None, None, None, None, None, "Converter not initialized. Please initialize first."
     
     if stored_depth_map is None:
-        return None, None, None, None, None, "Please generate depth map first"
+        return None, None, None, None, None, None, "Please generate depth map first"
     
     try:
         # Convert to numpy array (OpenCV format)
@@ -860,6 +860,9 @@ def process_image(image, shift_factor, resolution, patch_size, patch_overlap, st
         anaglyph_pil = Image.fromarray(cv2.cvtColor(anaglyph, cv2.COLOR_BGR2RGB))
         sbs_3d_pil = Image.fromarray(cv2.cvtColor(sbs_3d, cv2.COLOR_BGR2RGB))
         
+        # Create raw depth map image for display
+        raw_depth_pil = Image.fromarray(cached_depth_gray)
+        
         # Save images to results directory
         timestamp = int(time.time())
         os.makedirs("results", exist_ok=True)
@@ -903,14 +906,14 @@ def process_image(image, shift_factor, resolution, patch_size, patch_overlap, st
         
         output_files = [depth_path, anaglyph_path, sbs_path, wiggle_gif_path, depth_blur_path, raw_depth_jpg_path, raw_depth_png_path]
         
-        return depth_colored_pil, depth_blurred_2d_pil, anaglyph_pil, sbs_3d_pil, wiggle_gif_path, output_files, progress_message
+        return depth_colored_pil, depth_blurred_2d_pil, anaglyph_pil, sbs_3d_pil, wiggle_gif_path, raw_depth_pil, output_files, progress_message
         
     except Exception as e:
         error_message = f"Error processing image: {str(e)}\nPlease try a different image or reinitialize the converter."
         print(error_message)
         import traceback
         traceback.print_exc() 
-        return None, None, None, None, None, None, error_message
+        return None, None, None, None, None, None, None, error_message
 
 def clear_torch_cache():
     """Clear PyTorch CUDA cache"""
@@ -945,7 +948,7 @@ def clear_stored_depth_map():
     last_face_center = None
     selected_face_idx = None
     
-    return None, None, None, None, None, None, "Cleared stored depth map due to new image", gr.update(interactive=False, value="Need Generate Depth Map")
+    return None, None, None, None, None, None, None, None, "Cleared stored depth map due to new image", gr.update(interactive=False, value="Need Generate Depth Map")
 
 def set_focal_distance_from_click(focal_distance, focal_thickness, evt: gr.SelectData):
     """Handler for depth map click events to set focal plane"""
@@ -1514,6 +1517,8 @@ def build_interface():
                                 anaglyph = gr.Image(label="Red-Cyan Anaglyph")
                             with gr.TabItem("Wiggle GIF"):
                                 wiggle_gif = gr.Image(label="Wiggle GIF")
+                            with gr.TabItem("Raw Depth Map"):
+                                raw_depth_map = gr.Image(label="Raw Depth Map (Grayscale)")
                         
                         download_files = gr.File(label="Download Results")
                         progress = gr.Textbox(label="Processing Status")
@@ -1592,7 +1597,7 @@ def build_interface():
             cached_depth_width = None
             base_depth_image = None
             original_input_image = None
-            return None, None, None, None, None, None, "Cleared stored depth map due to new image", gr.update(interactive=False, value="Need Generate Depth Map")
+            return None, None, None, None, None, None, None, None, "Cleared stored depth map due to new image", gr.update(interactive=False, value="Need Generate Depth Map")
         
         process_btn.click(
             process_image, 
@@ -1601,21 +1606,21 @@ def build_interface():
                 patch_overlap, steps, cfg_scale, high_quality, debug_mode,
                 apply_depth_blur, focal_distance, focal_thickness, blur_intensity, blur_radius
             ], 
-            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, download_files, progress]
+            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, raw_depth_map, download_files, progress]
         )
         
         # Update the clear_btn click event to also disable the process_btn and update its text
         clear_btn.click(
             _clear_stored_depth_map,
             inputs=[],
-            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, download_files, progress, process_btn]
+            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, raw_depth_map, download_files, progress, process_btn]
         )
         
         # Update the input_image change event to also disable the process_btn and update its text
         input_image.change(
             _clear_stored_depth_map,
             inputs=[],
-            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, download_files, progress, process_btn]
+            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, raw_depth_map, download_files, progress, process_btn]
         )
     
     return interface
