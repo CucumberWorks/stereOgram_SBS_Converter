@@ -13,6 +13,13 @@ import time
 import imageio
 from dotenv import load_dotenv
 
+# Add the current directory to the Python path
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Import the converter from the core module
+from core.stereogram_sbs3d_converter import StereogramSBS3DConverter
+
 # Load environment variables
 load_dotenv()
 
@@ -48,7 +55,6 @@ async def initialize_converter():
     """Initialize the SBS converter only when needed."""
     global converter
     if converter is None:
-        from core.stereogram_sbs3d_converter import StereogramSBS3DConverter
         converter = StereogramSBS3DConverter(
             use_advanced_infill=True,
             depth_model_type="depth_anything_v2",
@@ -458,14 +464,16 @@ async def on_message(message):
     # Process commands
     await bot.process_commands(message)
 
-if __name__ == "__main__":
+# Main function to run the bot
+def main():
     # Check if token is available
     if not TOKEN:
         print("Error: Discord bot token not found in environment variables.")
         print("Please set DISCORD_BOT_TOKEN in your .env file.")
-        exit(1)
+        return 1
     
     try:
+        # Run the Discord bot
         bot.run(TOKEN)
     except Exception as e:
         print(f"Error running the bot: {e}")
@@ -480,6 +488,12 @@ if __name__ == "__main__":
             print("2. Select your application")
             print("3. Go to Bot section")
             print("4. Enable 'Message Content Intent' under 'Privileged Gateway Intents'")
+        return 1
     finally:
         # Make sure to clean up resources
-        clear_converter() 
+        clear_converter()
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main()) 

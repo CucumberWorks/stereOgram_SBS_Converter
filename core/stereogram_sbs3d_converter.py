@@ -10,7 +10,7 @@ import os
 import gc
 
 class StereogramSBS3DConverter:
-    def __init__(self, use_advanced_infill=True, depth_model_type="depth_anything_v2", model_size="vitb", max_resolution=4096, low_memory_mode=False):
+    def __init__(self, use_advanced_infill=False, depth_model_type="depth_anything_v2", model_size="vitb", max_resolution=4096, low_memory_mode=False):
         # Initialize parameters
         self.use_advanced_infill = use_advanced_infill
         self.depth_model_type = depth_model_type
@@ -20,7 +20,21 @@ class StereogramSBS3DConverter:
         self.high_color_quality = True  # Always enable high color quality
         
         # Initialize resources when needed
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Check if MPS is available (Apple Silicon) and handle it specially
+        if torch.backends.mps.is_available():
+            print("Using Apple MPS (Metal Performance Shaders)")
+            # For MPS, we need to ensure consistent tensor types
+            self.device = torch.device("mps")
+            self.use_cpu_for_model_load = True
+            
+            # On some MPS setups, advanced inpainting causes problems
+            # If you want to completely disable advanced inpainting on MPS, uncomment this line:
+            # self.use_advanced_infill = False
+            # print("Disabled advanced inpainting on MPS for stability")
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.use_cpu_for_model_load = False
+            
         self.depth_model = None
         self.inpaint_model = None
         self.inpaint_steps = 20
@@ -41,10 +55,13 @@ class StereogramSBS3DConverter:
     
     def _init_depth_model(self):
         """Initialize depth estimation model based on selected type"""
+        # For MPS compatibility, we may need to load the model on CPU first
+        device_for_loading = torch.device("cpu") if self.use_cpu_for_model_load else self.device
+        
         if self.depth_model_type == "midas":
             # MiDaS depth estimation model
             self.depth_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
-            self.depth_model.to(self.device)
+            self.depth_model.to(device_for_loading)
             self.depth_model.eval()
             
             # MiDaS transformation
@@ -63,7 +80,7 @@ class StereogramSBS3DConverter:
                 
                 # Use the largest model for highest quality
                 self.depth_model = DepthAnything.from_pretrained("LiheYoung/depth_anything_vitl14")
-                self.depth_model.to(self.device)
+                self.depth_model.to(device_for_loading)
                 self.depth_model.eval()
                 
                 # Define the transform for Depth Anything
@@ -79,7 +96,7 @@ class StereogramSBS3DConverter:
                 # Fallback to MiDaS
                 self.depth_model_type = "midas"
                 self.depth_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
-                self.depth_model.to(self.device)
+                self.depth_model.to(device_for_loading)
                 self.depth_model.eval()
                 
                 # MiDaS transformation
@@ -97,7 +114,6 @@ class StereogramSBS3DConverter:
                 from depth_anything_v2.dpt import DepthAnythingV2
                 
                 # Define model configuration based on model size
-                # Using ViT-B model for better memory efficiency (can be changed to vits or vitl)
                 encoder = self.model_size  # Use the model_size parameter from initialization
                 model_configs = {
                     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -115,7 +131,7 @@ class StereogramSBS3DConverter:
                     # Fallback to MiDaS
                     self.depth_model_type = "midas"
                     self.depth_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
-                    self.depth_model.to(self.device)
+                    self.depth_model.to(device_for_loading)
                     self.depth_model.eval()
                     
                     # MiDaS transformation
@@ -149,10 +165,16 @@ class StereogramSBS3DConverter:
                     else:
                         print(f"No pre-built URL for {encoder} model, please download manually")
                 
-                # Load the weights
+                # Load the weights - for MPS, we need to load on CPU first
                 try:
-                    self.depth_model.load_state_dict(torch.load(weight_path, map_location=self.device))
-                    self.depth_model.to(self.device)
+                    if self.use_cpu_for_model_load:
+                        print("Loading model weights on CPU first for MPS compatibility")
+                        self.depth_model.load_state_dict(torch.load(weight_path, map_location="cpu"))
+                        self.depth_model.to(device_for_loading)  # Keep on CPU for now
+                    else:
+                        self.depth_model.load_state_dict(torch.load(weight_path, map_location=self.device))
+                        self.depth_model.to(self.device)
+                    
                     self.depth_model.eval()
                     print(f"Loaded Depth Anything V2 {encoder} model")
                 except Exception as e:
@@ -165,7 +187,7 @@ class StereogramSBS3DConverter:
                 # Fallback to MiDaS
                 self.depth_model_type = "midas"
                 self.depth_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
-                self.depth_model.to(self.device)
+                self.depth_model.to(device_for_loading)
                 self.depth_model.eval()
                 
                 # MiDaS transformation
@@ -173,45 +195,80 @@ class StereogramSBS3DConverter:
                 self.transform = self.midas_transforms.small_transform
     
     def _init_inpainting_model(self):
-        """Initialize advanced inpainting model using Stable Diffusion"""
-        try:
-            if self.low_memory_mode:
-                print("Using low memory mode for inpainting - loading model with reduced precision")
-                # Load the model with reduced precision and memory optimizations
-                self.inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
-                    "runwayml/stable-diffusion-inpainting",
-                    torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
-                    revision="fp16" if self.device.type == "cuda" else "main",
-                    safety_checker=None  # Skip safety checker to save memory
-                )
+        """Initialize inpainting model for advanced hole filling"""
+        if self.use_advanced_infill:
+            try:
+                # Import here to avoid circular imports
+                import torch
                 
-                # Enable memory efficient attention if xformers is available
+                # Use device for loading
+                device_for_loading = torch.device("cpu") if self.use_cpu_for_model_load else self.device
+                
+                # Load the stable diffusion inpainting model
                 try:
-                    from diffusers.utils import is_xformers_available
-                    if is_xformers_available():
-                        self.inpaint_model.enable_xformers_memory_efficient_attention()
-                        print("Using xformers for memory-efficient attention")
-                    else:
-                        print("xformers not available, using standard attention")
-                except ImportError:
-                    print("Could not check for xformers, using standard attention")
+                    # First try stable-diffusion-2-inpainting
+                    model_path = "stabilityai/stable-diffusion-2-inpainting"
+                    print(f"Loading inpainting model from {model_path}")
+                    
+                    # For MPS compatibility, we need to avoid certain optimizations
+                    use_auth_token = False
+                    extra_kwargs = {}
+                    
+                    # Check for torch version to handle compatibility
+                    torch_version = tuple(map(int, torch.__version__.split('.')[:2]))
+                    if torch_version >= (2, 0) and torch.backends.mps.is_available():
+                        print("Using torch 2.0+ with MPS - applying special handling")
+                        extra_kwargs["variant"] = "fp32"  # Force fp32 for MPS
+                    
+                    self.inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
+                        model_path,
+                        use_auth_token=use_auth_token,
+                        **extra_kwargs
+                    )
+                    
+                except Exception as e:
+                    # If that fails, try the older model
+                    print(f"Error loading SD2 model: {e}, trying fallback model")
+                    model_path = "runwayml/stable-diffusion-inpainting"
+                    print(f"Loading fallback inpainting model from {model_path}")
+                    self.inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
+                        model_path,
+                        use_auth_token=False
+                    )
                 
-                # Use model offloading to save VRAM
-                self.inpaint_model.enable_sequential_cpu_offload()
-                print("Enabled sequential CPU offloading for model weights")
-            else:
-                # Use standard loading
-                self.inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
-                    "runwayml/stable-diffusion-inpainting",
-                    torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
-                )
-                # Disable safety checker to prevent NSFW filtering
-                self.inpaint_model.safety_checker = None
-                self.inpaint_model.to(self.device)
-        except Exception as e:
-            print(f"Error initializing inpainting model: {e}")
-            print("Will fall back to basic inpainting")
-            self.use_advanced_infill = False
+                # Disable safety checker to save memory
+                if hasattr(self.inpaint_model, "safety_checker") and self.inpaint_model.safety_checker is not None:
+                    self.inpaint_model.safety_checker = None
+                    print("Disabled safety checker to save memory")
+                
+                # Move to proper device
+                if device_for_loading == torch.device("mps"):
+                    # Special handling for MPS
+                    print("Setting up model for MPS")
+                    self.inpaint_model.to("mps")
+                else:
+                    self.inpaint_model.to(device_for_loading)
+                
+                # Use float16 if not using CPU and low memory mode is enabled
+                if device_for_loading.type != "cpu" and self.low_memory_mode and device_for_loading.type != "mps":
+                    print("Using float16 for inpainting model to reduce memory usage")
+                    try:
+                        # Only convert to float16 if cuda is available and supports it
+                        if torch.cuda.is_available():
+                            import torch.backends.cuda
+                            if torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction:
+                                self.inpaint_model.to(torch.float16)
+                                print("Converted inpainting model to float16")
+                    except Exception as e:
+                        print(f"Could not convert to float16: {e}")
+                
+                print(f"Inpainting model loaded and set to device: {device_for_loading}")
+            except Exception as e:
+                print(f"Error loading inpainting model: {e}")
+                import traceback
+                traceback.print_exc()
+                print("Advanced inpainting will not be available")
+                self.use_advanced_infill = False
     
     def extract_hole_patches(self, image, hole_mask, context_size=64):
         """Extract patches containing holes with some context around them"""
@@ -334,7 +391,33 @@ class StereogramSBS3DConverter:
             max_side = max(width, height)
             input_size = min(1120, max(518, (max_side // 14) * 14))  # Use larger input size for better quality
             print(f"Using input size {input_size} for Depth Anything V2 inference")
-            depth_map = self.depth_model.infer_image(raw_image, input_size=input_size)
+            
+            try:
+                # For MPS compatibility, when using MPS, potentially move model to device
+                if self.use_cpu_for_model_load and torch.backends.mps.is_available():
+                    # At inference time, move the model to MPS
+                    print("Moving model to MPS for inference")
+                    self.depth_model.to(self.device)
+                
+                # Now call inference
+                depth_map = self.depth_model.infer_image(raw_image, input_size=input_size)
+                
+                # If needed, move model back to CPU for next run to prevent type mismatch
+                if self.use_cpu_for_model_load and torch.backends.mps.is_available():
+                    print("Moving model back to CPU after inference")
+                    self.depth_model.to(torch.device("cpu"))
+                    torch.mps.empty_cache()
+                    
+            except RuntimeError as e:
+                if "Input type" in str(e) and "weight type" in str(e) and torch.backends.mps.is_available():
+                    print("Detected MPS tensor type mismatch, retrying with model on CPU")
+                    # Move model to CPU for execution
+                    self.depth_model.to(torch.device("cpu"))
+                    # Run inference on CPU
+                    depth_map = self.depth_model.infer_image(raw_image, input_size=input_size)
+                else:
+                    # Re-raise other exceptions
+                    raise
             
         elif self.depth_model_type == "depth_anything":
             # Process with Depth Anything
@@ -342,7 +425,15 @@ class StereogramSBS3DConverter:
             pil_image_resized = pil_image
                 
             # Apply transform and move to device
-            img_input = self.transform(pil_image_resized).unsqueeze(0).to(self.device)
+            img_input = self.transform(pil_image_resized).unsqueeze(0)
+            
+            # Handle MPS compatibility
+            if self.use_cpu_for_model_load and torch.backends.mps.is_available():
+                # Use CPU for inference if needed for compatibility
+                img_input = img_input.to(torch.device("cpu"))
+                self.depth_model.to(torch.device("cpu"))
+            else:
+                img_input = img_input.to(self.device)
             
             with torch.no_grad():
                 # Get depth prediction
@@ -360,9 +451,22 @@ class StereogramSBS3DConverter:
             # Convert to numpy
             depth_map = depth_map.cpu().numpy()
             
+            # Move model back to proper device if needed
+            if self.use_cpu_for_model_load and torch.backends.mps.is_available():
+                self.depth_model.to(torch.device("cpu"))  # Keep on CPU for next use
+                torch.mps.empty_cache()
+            
         else:
             # Process with MiDaS (original method)
-            img_input = self.transform(img_array).to(self.device)
+            img_input = self.transform(img_array)
+            
+            # Handle MPS compatibility
+            if self.use_cpu_for_model_load and torch.backends.mps.is_available():
+                # Use CPU for inference if needed for compatibility
+                img_input = img_input.to(torch.device("cpu"))
+                self.depth_model.to(torch.device("cpu"))
+            else:
+                img_input = img_input.to(self.device)
             
             with torch.no_grad():
                 depth_map = self.depth_model(img_input)
@@ -375,6 +479,11 @@ class StereogramSBS3DConverter:
             
             # Convert to numpy
             depth_map = depth_map.cpu().numpy()
+            
+            # Move model back to proper device if needed
+            if self.use_cpu_for_model_load and torch.backends.mps.is_available():
+                self.depth_model.to(torch.device("cpu"))  # Keep on CPU for next use
+                torch.mps.empty_cache()
         
         # Normalize depth map to 0-1 range
         depth_min = depth_map.min()
@@ -386,8 +495,22 @@ class StereogramSBS3DConverter:
         
         return depth_normalized
     
-    def generate_stereo_views(self, image, depth_map, shift_factor=0.05):
-        """Generate left and right views based on depth map"""
+    def generate_stereo_views(self, image, depth_map, shift_factor=0.05, apply_depth_blur=False, 
+                             focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21):
+        """Generate left and right views based on depth map
+        
+        This enhanced version applies depth-based blur using parallax-shifted depth maps.
+        
+        Args:
+            image: Input image
+            depth_map: Depth map (0-1 range)
+            shift_factor: Amount of shift for stereo effect
+            apply_depth_blur: Whether to apply depth-based blur
+            focal_distance: Distance to keep in focus (0-1, where 0 is closest, 1 is farthest)
+            focal_thickness: Thickness of the in-focus region (0-1)
+            blur_strength: Strength of the blur effect (multiplier)
+            max_blur_size: Maximum kernel size for blur
+        """
         height, width = depth_map.shape[:2]
         
         # For better color precision, convert to float32 early in the process
@@ -396,107 +519,215 @@ class StereogramSBS3DConverter:
         # Create coordinate maps
         x_coords, y_coords = np.meshgrid(np.arange(width), np.arange(height))
         
-        # Create left and right views as float32 to preserve color precision
-        left_view = np.zeros_like(image_float)
-        right_view = np.zeros_like(image_float)
-        
-        # Generate masks to track pixels that have been filled
-        left_mask = np.zeros((height, width), dtype=bool)
-        right_mask = np.zeros((height, width), dtype=bool)
-        
+        # STEP 1: CALCULATE PIXEL SHIFTS BASED ON DEPTH
         # Apply strong blur to depth map for transitions
         smoothed_depth = cv2.GaussianBlur(depth_map, (9, 9), 0)
         
         # Calculate shifts based on smoothed depth map to prevent harsh transitions
         shifts = (smoothed_depth * shift_factor * width).astype(int)
         
-        # Generate views (back to front)
-        for d in range(int(np.max(shifts)), -1, -1):
-            mask = (shifts == d)
+        # STEP 2: CREATE BASIC STEREO VIEWS WITHOUT BLUR
+        # Create basic left and right views without blur
+        left_view = np.zeros_like(image_float)
+        right_view = np.zeros_like(image_float)
+        
+        # Create parallax-shifted depth maps for left and right views
+        left_depth = np.zeros_like(depth_map, dtype=np.float32)
+        right_depth = np.zeros_like(depth_map, dtype=np.float32)
+        
+        # Generate masks to track pixels that have been filled
+        left_mask = np.zeros((height, width), dtype=bool)
+        right_mask = np.zeros((height, width), dtype=bool)
+        
+        # Get unique depth values and sort them from far to near
+        unique_shifts = np.unique(shifts)
+        unique_shifts.sort()  # Sort from smallest shift (far) to largest (near)
+        
+        # Generate stereo views and shifted depth maps (back to front)
+        for d in unique_shifts:
+            # Create a mask for pixels at this depth level
+            depth_mask = (shifts == d)
             
+            # If no pixels at this depth, skip
+            if not np.any(depth_mask):
+                continue
+                
             # For right view: shift left
-            x_coords_right = np.clip(x_coords - d, 0, width-1)
             # For left view: shift right
-            x_coords_left = np.clip(x_coords + d, 0, width-1)
-            
-            # Fill right view (where not already filled)
-            fill_mask_right = mask & ~right_mask[y_coords, x_coords_right]
-            right_view[y_coords[fill_mask_right], x_coords_right[fill_mask_right]] = image_float[y_coords[fill_mask_right], x_coords[fill_mask_right]]
-            right_mask[y_coords[fill_mask_right], x_coords_right[fill_mask_right]] = True
-            
-            # Fill left view (where not already filled)
-            fill_mask_left = mask & ~left_mask[y_coords, x_coords_left]
-            left_view[y_coords[fill_mask_left], x_coords_left[fill_mask_left]] = image_float[y_coords[fill_mask_left], x_coords[fill_mask_left]]
-            left_mask[y_coords[fill_mask_left], x_coords_left[fill_mask_left]] = True
-        
-        # Perform gap filling - preprocess holes to identify problematic edge boundaries
-        kernel_small = np.ones((3, 3), np.uint8)
-        left_holes = ~left_mask
-        right_holes = ~right_mask
-        
-        # Dilate and erode to identify boundary regions
-        left_edge_mask = cv2.dilate(left_holes.astype(np.uint8), kernel_small, iterations=2) - cv2.erode(left_holes.astype(np.uint8), kernel_small, iterations=1)
-        right_edge_mask = cv2.dilate(right_holes.astype(np.uint8), kernel_small, iterations=2) - cv2.erode(right_holes.astype(np.uint8), kernel_small, iterations=1)
-        
-        # Process and smooth boundary regions first
-        # For left view boundaries
-        for y, x in zip(*np.where(left_edge_mask > 0)):
-            if not left_mask[y, x]:  # Only process holes
-                # Search in larger neighborhood for valid pixels (5x5 window)
-                valid_pixels = []
-                for dy in range(-4, 5):
-                    for dx in range(-4, 5):
-                        ny, nx = y + dy, x + dx
-                        if (0 <= ny < height and 0 <= nx < width and left_mask[ny, nx]):
-                            valid_pixels.append(left_view[ny, nx])
+            for y, x in zip(*np.where(depth_mask)):
+                # Calculate shifted x-coordinates
+                left_x = min(width-1, x + d)
+                right_x = max(0, x - d)
                 
-                if valid_pixels:
-                    # Use median filter for more robust edge filling
-                    # Use actual float median instead of converting to uint8
-                    left_view[y, x] = np.median(valid_pixels, axis=0)
-                    left_mask[y, x] = True
-        
-        # For right view boundaries
-        for y, x in zip(*np.where(right_edge_mask > 0)):
-            if not right_mask[y, x]:  # Only process holes
-                # Search in larger neighborhood for valid pixels
-                valid_pixels = []
-                for dy in range(-4, 5):
-                    for dx in range(-4, 5):
-                        ny, nx = y + dy, x + dx
-                        if (0 <= ny < height and 0 <= nx < width and right_mask[ny, nx]):
-                            valid_pixels.append(right_view[ny, nx])
+                # Fill left view if not already filled
+                if not left_mask[y, left_x]:
+                    left_view[y, left_x] = image_float[y, x]
+                    left_depth[y, left_x] = depth_map[y, x]
+                    left_mask[y, left_x] = True
                 
-                if valid_pixels:
-                    # Use median filter for more robust edge filling
-                    # Use actual float median instead of converting to uint8
-                    right_view[y, x] = np.median(valid_pixels, axis=0)
-                    right_mask[y, x] = True
+                # Fill right view if not already filled
+                if not right_mask[y, right_x]:
+                    right_view[y, right_x] = image_float[y, x]
+                    right_depth[y, right_x] = depth_map[y, x]
+                    right_mask[y, right_x] = True
         
-        # Apply a joint bilateral filter to smooth transitions while preserving edges
-        # Keep working in float32 to minimize banding
-        if np.any(left_mask):
-            # Use the d parameter to limit the computational radius for better performance
-            sigma_s = 60 if not self.low_memory_mode else 40
-            sigma_r = 0.4 if not self.low_memory_mode else 0.3
-            # Use bilateral filter which better preserves edges than edgePreservingFilter
-            # and minimizes banding in smooth areas
-            left_view = cv2.bilateralFilter(left_view, d=9, sigmaColor=sigma_r*100, sigmaSpace=sigma_s)
-            
-        if np.any(right_mask):
-            sigma_s = 60 if not self.low_memory_mode else 40
-            sigma_r = 0.4 if not self.low_memory_mode else 0.3
-            right_view = cv2.bilateralFilter(right_view, d=9, sigmaColor=sigma_r*100, sigmaSpace=sigma_s)
+        # Fill holes in the stereo views and depth maps
+        if np.any(~left_mask):
+            left_holes = ~left_mask
+            left_view, left_depth = self._fill_view_holes(left_view, left_depth, left_holes)
+            left_mask = np.ones_like(left_mask)  # Update mask after filling
         
-        # Convert back to uint8 at the very end to minimize rounding errors
-        left_view_uint8 = np.clip(left_view, 0, 255).astype(np.uint8)
-        right_view_uint8 = np.clip(right_view, 0, 255).astype(np.uint8)
+        if np.any(~right_mask):
+            right_holes = ~right_mask
+            right_view, right_depth = self._fill_view_holes(right_view, right_depth, right_holes)
+            right_mask = np.ones_like(right_mask)  # Update mask after filling
         
-        # Update holes after boundary processing
-        left_holes = ~left_mask
-        right_holes = ~right_mask
+        # If not applying depth blur, convert to uint8 and return the basic stereo views
+        if not apply_depth_blur:
+            left_view_uint8 = np.clip(left_view, 0, 255).astype(np.uint8)
+            right_view_uint8 = np.clip(right_view, 0, 255).astype(np.uint8)
+            # Recompute holes after hole filling
+            left_holes = ~left_mask
+            right_holes = ~right_mask
+            return left_view_uint8, right_view_uint8, left_holes, right_holes
+        
+        # STEP 3: APPLY DEPTH BLUR USING PARALLAX-SHIFTED DEPTH MAPS
+        # Convert to linear light space for physically accurate color mixing
+        gamma = 2.2
+        left_linear = np.power(left_view / 255.0, gamma)
+        right_linear = np.power(right_view / 255.0, gamma)
+        
+        # Process left view with depth blur using its parallax-shifted depth map
+        left_blurred = self._apply_depth_blur_to_view(
+            left_linear, 
+            left_depth, 
+            focal_distance, 
+            focal_thickness, 
+            blur_strength, 
+            max_blur_size
+        )
+        
+        # Process right view with depth blur using its parallax-shifted depth map
+        right_blurred = self._apply_depth_blur_to_view(
+            right_linear, 
+            right_depth, 
+            focal_distance, 
+            focal_thickness, 
+            blur_strength, 
+            max_blur_size
+        )
+        
+        # Convert back to uint8
+        left_view_uint8 = np.clip(left_blurred * 255.0, 0, 255).astype(np.uint8)
+        right_view_uint8 = np.clip(right_blurred * 255.0, 0, 255).astype(np.uint8)
+        
+        # No holes after processing
+        left_holes = np.zeros_like(left_mask)
+        right_holes = np.zeros_like(right_mask)
         
         return left_view_uint8, right_view_uint8, left_holes, right_holes
+    
+    def _fill_view_holes(self, view, depth_map, holes_mask):
+        """Fill holes in view and depth map using nearest neighbor approach"""
+        height, width = depth_map.shape[:2]
+        filled_view = view.copy()
+        filled_depth = depth_map.copy()
+        
+        for y, x in zip(*np.where(holes_mask)):
+            # Find nearest valid pixel
+            valid_pixels = []
+            search_radius = 5
+            for dy in range(-search_radius, search_radius+1):
+                for dx in range(-search_radius, search_radius+1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < height and 0 <= nx < width and not holes_mask[ny, nx]:
+                        dist = np.sqrt(dy*dy + dx*dx)
+                        valid_pixels.append((filled_view[ny, nx], filled_depth[ny, nx], dist))
+            
+            if valid_pixels:
+                # Use nearest valid pixel
+                valid_pixels.sort(key=lambda x: x[2])
+                filled_view[y, x] = valid_pixels[0][0]
+                filled_depth[y, x] = valid_pixels[0][1]
+        
+        return filled_view, filled_depth
+    
+    def _apply_depth_blur_to_view(self, image, depth_map, focal_distance, focal_thickness, blur_strength, max_blur_size):
+        """Apply depth-based blur to a view using its parallax-shifted depth map
+        
+        Args:
+            image: Image in linear light space (0-1 range)
+            depth_map: Parallax-shifted depth map (0-1 range)
+            focal_distance: Distance to keep in focus (0-1)
+            focal_thickness: Thickness of the in-focus region (0-1)
+            blur_strength: Strength of the blur effect (multiplier)
+            max_blur_size: Maximum kernel size for blur
+            
+        Returns:
+            Blurred image in linear light space (0-1 range)
+        """
+        height, width = depth_map.shape[:2]
+        result = np.zeros_like(image)
+        
+        # Calculate focal plane boundaries for determining blur amount
+        half_thickness = focal_thickness / 2.0
+        lower_bound = max(0, focal_distance - half_thickness)
+        upper_bound = min(1.0, focal_distance + half_thickness)
+        
+        # Create mask for in-focus region (no blur)
+        in_focus_mask = np.logical_and(
+            depth_map >= lower_bound,
+            depth_map <= upper_bound
+        )
+        
+        # Calculate focus distance (how far each pixel is from the in-focus region)
+        focus_distance = np.zeros_like(depth_map)
+        
+        # Pixels closer than focal plane (foreground)
+        foreground_mask = depth_map < lower_bound
+        if np.any(foreground_mask):
+            focus_distance[foreground_mask] = lower_bound - depth_map[foreground_mask]
+        
+        # Pixels further than focal plane (background)
+        background_mask = depth_map > upper_bound
+        if np.any(background_mask):
+            focus_distance[background_mask] = depth_map[background_mask] - upper_bound
+        
+        # Scale the focus distance to get blur kernel sizes
+        # Multiply by blur_strength to control effect intensity
+        # Ensure odd kernel sizes (required by GaussianBlur)
+        blur_sizes = np.clip(2 * np.ceil(focus_distance * blur_strength * max_blur_size) + 1, 1, max_blur_size).astype(int)
+        
+        # Set blur size to 1 (no blur) for in-focus regions
+        blur_sizes[in_focus_mask] = 1
+        
+        # Get unique blur sizes
+        unique_blur_sizes = np.unique(blur_sizes)
+        
+        # If all pixels are in focus or blur strength is zero, return original image
+        if len(unique_blur_sizes) == 1 and unique_blur_sizes[0] == 1:
+            return image
+        
+        # Copy in-focus areas directly
+        result[in_focus_mask] = image[in_focus_mask]
+        
+        # For each unique blur size, apply appropriate blur and copy to result
+        for blur_size in unique_blur_sizes:
+            if blur_size == 1:
+                continue  # Skip in-focus areas (already handled)
+                
+            # Create mask for this blur size
+            blur_mask = blur_sizes == blur_size
+            if not np.any(blur_mask):
+                continue
+                
+            # Apply blur to the entire image (this is computationally intensive but ensures correct blur)
+            blurred = cv2.GaussianBlur(image, (blur_size, blur_size), 0)
+            
+            # Copy the blurred pixels to the result for this blur level
+            result[blur_mask] = blurred[blur_mask]
+        
+        return result
     
     def basic_infill(self, image, hole_mask):
         """Basic inpainting using OpenCV's inpainting algorithm"""
@@ -767,17 +998,206 @@ class StereogramSBS3DConverter:
         return (img_dithered * 255).astype(np.uint8)
 
     def _enhance_image_quality(self, img):
-        """Enhance image quality with focus on minimizing banding"""
-        # Skip enhancement if disabled
-        if not self.high_color_quality:
-            return img
+        """Enhance image quality with better color precision"""
+        # Apply bilateral filter to reduce noise while preserving edges
+        # Parameters tuned for good balance of performance and quality
+        enhanced = cv2.bilateralFilter(img, d=5, sigmaColor=50, sigmaSpace=50)
+        return enhanced
         
-        # Apply dithering if enabled
-        if self.apply_dithering:
-            img = self._apply_dithering(img)
+    def apply_depth_based_blur(self, image, depth_map, focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21):
+        """
+        Apply realistic depth-of-field blur based on the depth map
         
-        return img
-
+        This enhanced version:
+        1. Processes depth layers from back to front for realistic occlusion
+        2. Creates a "spread" effect for out-of-focus areas with ultra-smooth transitions
+        3. Simulates natural bokeh-style blurring with exponential transparency falloff
+        4. Uses linear light space for physically accurate color blending
+        
+        Args:
+            image: Original image to apply blur to
+            depth_map: Depth map (0-1 range)
+            focal_distance: Distance to keep in focus (0-1, where 0 is closest, 1 is farthest) 
+            focal_thickness: Thickness of the in-focus region (0-1)
+            blur_strength: Strength of the blur effect (multiplier)
+            max_blur_size: Maximum kernel size for blur
+            
+        Returns:
+            Image with realistic depth-based blur applied
+        """
+        # Normalize depth map to 0-1 range if needed
+        if depth_map.max() > 1.0:
+            normalized_depth = depth_map / depth_map.max()
+        else:
+            normalized_depth = depth_map.copy()
+            
+        # Calculate focal plane boundaries
+        half_thickness = focal_thickness / 2.0
+        lower_bound = max(0, focal_distance - half_thickness)
+        upper_bound = min(1.0, focal_distance + half_thickness)
+        
+        # Create mask for in-focus region (no blur)
+        in_focus_mask = np.logical_and(
+            normalized_depth >= lower_bound,
+            normalized_depth <= upper_bound
+        )
+        
+        # Calculate focus distance (how far each pixel is from the in-focus region)
+        focus_distance = np.zeros_like(normalized_depth)
+        
+        # Pixels closer than focal plane (foreground)
+        foreground_mask = normalized_depth < lower_bound
+        if np.any(foreground_mask):
+            focus_distance[foreground_mask] = lower_bound - normalized_depth[foreground_mask]
+            
+        # Pixels further than focal plane (background)
+        background_mask = normalized_depth > upper_bound
+        if np.any(background_mask):
+            focus_distance[background_mask] = normalized_depth[background_mask] - upper_bound
+        
+        # Scale the focus distance to get blur kernel sizes
+        # Multiply by blur_strength to control effect intensity
+        # Ensure odd kernel sizes (required by GaussianBlur)
+        blur_sizes = np.clip(2 * np.ceil(focus_distance * blur_strength * max_blur_size) + 1, 1, max_blur_size).astype(int)
+        
+        # Set blur size to 1 (no blur) for in-focus regions
+        blur_sizes[in_focus_mask] = 1
+        
+        # Initialize output image with alpha channel for smoother blending
+        h, w, c = image.shape
+        result = np.zeros((h, w, 4), dtype=np.float32)
+        
+        # Get unique depth values and sort them (from far to near)
+        # We'll use these to process the image in layers from back to front
+        depth_bins = 50  # Number of discrete depth layers to process
+        depth_values = np.linspace(1.0, 0.0, depth_bins)  # From far (1.0) to near (0.0)
+        
+        # Convert to linear light space for physically accurate color mixing
+        # Standard gamma value is 2.2 for realistic light handling
+        gamma = 2.2
+        # Use float32 for better precision during processing
+        float_image = image.astype(np.float32)
+        # Convert from perceptual (sRGB) to linear light space
+        linear_image = np.power(float_image / 255.0, gamma)
+        
+        # First, add in-focus areas as the base layer (these are always visible)
+        # Convert to 4 channels (RGB + alpha)
+        linear_image_rgba = np.zeros((h, w, 4), dtype=np.float32)
+        linear_image_rgba[:,:,:3] = linear_image
+        linear_image_rgba[:,:,3] = 1.0  # Full opacity (now in 0-1 range for linear space)
+        
+        # Copy in-focus areas to result with full opacity
+        result[in_focus_mask] = linear_image_rgba[in_focus_mask]
+        
+        # Track which pixels have been filled with closer objects (fully opaque)
+        filled_pixels = in_focus_mask.copy()
+        
+        # Process each depth layer from far to near
+        for depth_val in depth_values:
+            # Create layer mask for current depth with some thickness
+            layer_thickness = 1.0 / depth_bins
+            layer_mask = np.logical_and(
+                normalized_depth >= depth_val - layer_thickness,
+                normalized_depth < depth_val + layer_thickness
+            )
+            
+            # Exclude in-focus areas and already filled pixels
+            layer_mask = np.logical_and(layer_mask, ~filled_pixels)
+            
+            # If no pixels in this layer, skip
+            if not np.any(layer_mask):
+                continue
+            
+            # Get blur size for this layer
+            layer_blur_size = blur_sizes[layer_mask].max()
+            if layer_blur_size <= 1:
+                # No blur needed, just copy the pixels with full opacity
+                result[layer_mask, :3] = linear_image[layer_mask]
+                result[layer_mask, 3] = 1.0
+            else:
+                # Apply blur to the entire image (this simulates the spreading effect)
+                # Blur in linear light space for physically accurate light spread
+                blurred = cv2.GaussianBlur(linear_image, (layer_blur_size, layer_blur_size), 0)
+                
+                # Apply dilated mask to simulate bokeh/spread effect with ultra-smooth transitions
+                if layer_blur_size > 1:
+                    # Calculate more aggressive spread based on blur size
+                    # Larger blur = wider spread
+                    spread_factor = 1.0 + (layer_blur_size / max_blur_size)  # Ranges from 1.0 to 2.0
+                    
+                    # Create a dilated mask that spreads the effect
+                    # Use larger kernel for more aggressive spread
+                    kernel_size = max(5, int(layer_blur_size * spread_factor * 0.5))
+                    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+                    
+                    # Create a series of dilated masks with decreasing opacity
+                    # Use more steps for smoother transition
+                    spread_steps = 7  # Increased from 3 to 7 for much smoother falloff
+                    
+                    # Core pixels of this layer - always appear with full opacity
+                    # Mark these as filled immediately
+                    result[layer_mask, :3] = blurred[layer_mask]
+                    result[layer_mask, 3] = 1.0
+                    filled_pixels = np.logical_or(filled_pixels, layer_mask)
+                    
+                    # Create initial dilated mask
+                    base_dilated = cv2.dilate(layer_mask.astype(np.uint8), kernel)
+                    
+                    for i in range(1, spread_steps + 1):
+                        # Calculate non-linear dilation amount that increases with each step
+                        # This creates wider spread zones with each step
+                        dilation_factor = i / spread_steps
+                        # Use exponential function for more aggressive spread
+                        dilation_factor = np.power(dilation_factor, 0.7)  # < 1 means more aggressive spread
+                        
+                        dilation_amount = max(1, int(kernel_size * dilation_factor * 2))
+                        step_kernel = np.ones((dilation_amount, dilation_amount), np.uint8)
+                        
+                        # Dilate from the base dilated mask each time
+                        # This creates more even spreading in all directions
+                        dilated_mask = cv2.dilate(base_dilated, step_kernel)
+                        
+                        # Calculate alpha value for this dilation step using exponential falloff
+                        # This creates much softer transitions
+                        # Use exponential falloff for much smoother transitions (non-linear)
+                        alpha_falloff = np.exp(-3.0 * (i / spread_steps))  # Exponential falloff
+                        
+                        # Only apply spread effect to unfilled areas
+                        spread_mask = np.logical_and(dilated_mask.astype(bool), ~filled_pixels)
+                        
+                        if np.any(spread_mask):
+                            # Apply blurred pixels with calculated alpha
+                            result[spread_mask, :3] = blurred[spread_mask]
+                            result[spread_mask, 3] = alpha_falloff
+                            
+                            # Don't mark these pixels as filled, to allow layering of semi-transparent areas
+                            # from different depth levels
+                else:
+                    # No spread needed, just copy with full opacity
+                    result[layer_mask, :3] = blurred[layer_mask]
+                    result[layer_mask, 3] = 1.0
+                    
+                    # Mark the core layer pixels as filled (fully opaque)
+                    filled_pixels = np.logical_or(filled_pixels, layer_mask)
+        
+        # Create the final composited image by blending all layers
+        # Use proper alpha compositing for realistic results
+        # First, create a background canvas (we'll use black)
+        final_result_linear = np.zeros_like(linear_image)
+        
+        # Apply alpha compositing formula: dst = (src * alpha) + (dst * (1 - alpha))
+        # Since we're starting with a black background, the initial dst is zeros
+        alpha = result[:,:,3][:,:,np.newaxis]  # Add dimension for broadcasting
+        
+        # Apply alpha compositing in linear light space
+        final_result_linear = result[:,:,:3] * alpha
+        
+        # Convert back from linear light space to perceptual space (sRGB)
+        final_result_srgb = np.power(final_result_linear, 1.0/gamma) * 255.0
+        
+        # Convert back to uint8
+        return np.clip(final_result_srgb, 0, 255).astype(np.uint8)
+    
     def _enhanced_anti_banding(self, img):
         """Apply advanced anti-banding techniques with 16-bit color precision"""
         # Convert to float32 for higher bit depth processing
@@ -825,23 +1245,45 @@ class StereogramSBS3DConverter:
         # Convert back to uint8
         return (result * 255).astype(np.uint8)
 
-    def generate_sbs_stereo(self, image_path, output_path=None, shift_factor=0.05, efficient_mode=True):
-        """Generate side-by-side stereo 3D image from 2D image"""
+    def generate_sbs_stereo(self, image_path, output_path=None, shift_factor=0.05, efficient_mode=True, 
+                           apply_depth_blur=False, focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21):
+        """Generate side-by-side stereo 3D image from 2D image
+        
+        Args:
+            image_path: Path to the input image or image array
+            output_path: Path to save the output image (optional)
+            shift_factor: Factor to control stereo separation
+            efficient_mode: Whether to use efficient mode for inpainting
+            apply_depth_blur: Whether to apply depth-based blur
+            focal_distance: Distance to keep in focus (0-1, where 0 is closest, 1 is farthest)
+            focal_thickness: Thickness of the in-focus region (0-1)
+            blur_strength: Strength of the blur effect (multiplier)
+            max_blur_size: Maximum kernel size for blur
+            
+        Returns:
+            Tuple of (combined stereo image, left view, right view, depth map)
+        """
         # Load image
         if isinstance(image_path, str):
             image = cv2.imread(image_path)
         else:
             image = image_path
             
-        # Use higher precision internal processing (float32)
-        image_float = image.astype(np.float32)
-        
         # Estimate depth
         depth_map = self.estimate_depth(image)
         
-        # Generate stereo views
+        # Generate stereo views with integrated blur effect if enabled
+        if apply_depth_blur:
+            print(f"Applying depth-based blur (focal distance: {focal_distance}, thickness: {focal_thickness}, strength: {blur_strength})")
+        
+        # Generate the stereo views with integrated depth blur (if enabled)
         left_view, right_view, left_holes, right_holes = self.generate_stereo_views(
-            image, depth_map, shift_factor
+            image, depth_map, shift_factor, 
+            apply_depth_blur=apply_depth_blur,
+            focal_distance=focal_distance,
+            focal_thickness=focal_thickness,
+            blur_strength=blur_strength,
+            max_blur_size=max_blur_size
         )
         
         # Apply inpainting to fill holes
@@ -1088,86 +1530,131 @@ class StereogramSBS3DConverter:
     
     def inpaint_diffusion(self, img_pil, mask_pil, steps=20, guidance_scale=7.5, 
                         patch_size=128, patch_overlap=32, high_quality=True):
-        """Apply diffusion-based inpainting using the advanced_infill module.
-        
-        This method is used to fill holes in stereo views with realistic content.
-        
-        Args:
-            img_pil: PIL Image with holes to be filled
-            mask_pil: PIL Image mask where white (255) indicates holes
-            steps: Number of diffusion steps (higher = better quality, slower)
-            guidance_scale: How closely to follow the prompt (7.5 is good default)
-            patch_size: Size of patches for inpainting
-            patch_overlap: Overlap between patches
-            high_quality: Whether to use high quality settings
-            
-        Returns:
-            PIL Image with holes filled in
-        """
-        if not hasattr(self, 'advanced_infiller'):
-            # Import here to avoid loading models unnecessarily
-            try:
-                from core.advanced_infill import AdvancedInfillTechniques
-                self.advanced_infiller = AdvancedInfillTechniques(
-                    max_resolution=self.max_resolution,
-                    patch_size=patch_size,
-                    patch_overlap=patch_overlap,
-                    inference_steps=steps
-                )
-            except ImportError as e:
-                print(f"Error loading advanced infill module: {e}")
-                # Fall back to using OpenCV inpainting
-                img_np = np.array(img_pil)
-                mask_np = np.array(mask_pil)
-                inpainted = cv2.inpaint(img_np, mask_np, 3, cv2.INPAINT_TELEA)
-                return Image.fromarray(inpainted)
-                
+        """Use Stable Diffusion inpainting to fill missing areas"""
         try:
-            # Convert to numpy if advanced_infiller expects numpy arrays
+            # Import here to avoid circular imports
+            import torch
+            
+            if self.inpaint_model is None:
+                print("Inpainting model not available. Make sure to initialize with use_advanced_infill=True")
+                return np.array(img_pil)
+            
+            # Convert PIL images to numpy arrays and ensure they're in the right format
             img_np = np.array(img_pil)
             mask_np = np.array(mask_pil)
             
-            # Check if mask is binary
-            if mask_np.max() > 1:
-                mask_np = mask_np / 255.0
+            # Ensure mask is black (0) for keep, white (255) for inpaint
+            if mask_np.max() <= 1:
+                mask_np = mask_np * 255
+            
+            # Check if we need to actually inpaint anything
+            if mask_np.max() == 0:
+                return img_np  # Nothing to inpaint
+            
+            # Check for small patches that can be efficiently filled
+            total_pixels = mask_np.size
+            mask_pixels = np.sum(mask_np > 0)
+            mask_percentage = mask_pixels / total_pixels * 100
+            
+            # If very small area to inpaint (less than 0.2%), use basic inpainting
+            if mask_percentage < 0.2:
+                print(f"Small mask area ({mask_percentage:.2f}%), using basic inpainting")
+                mask_cv = mask_np.astype(np.uint8)
+                from_cv = cv2.inpaint(img_np, mask_cv, 3, cv2.INPAINT_TELEA)
+                return from_cv
+            
+            # For MPS compatibility, we need to be careful with device handling
+            using_mps = torch.backends.mps.is_available()
+            
+            # Determine device for inpainting
+            if using_mps:
+                # For MPS, check the current state of the model
+                current_device = next(self.inpaint_model.unet.parameters()).device
+                print(f"Current inpainting model device: {current_device}")
                 
-            # Check if multimodel_ensemble_infill method exists and use it
-            if hasattr(self.advanced_infiller, 'multimodel_ensemble_infill'):
-                inpainted = self.advanced_infiller.multimodel_ensemble_infill(
-                    img_np, mask_np, efficient_mode=not high_quality
-                )
-            # Otherwise try the _full_image_depth_aware_infill method
-            elif hasattr(self.advanced_infiller, '_full_image_depth_aware_infill'):
-                inpainted = self.advanced_infiller._full_image_depth_aware_infill(
-                    img_np, mask_np, prompt="photo realistic"
-                )
-            # If neither exists, use sdxl_inpaint if it exists
-            elif hasattr(self.advanced_infiller, 'sdxl_inpaint'):
-                # Need to convert back to PIL for the SDXL pipeline
-                result = self.advanced_infiller.sdxl_inpaint(
-                    prompt="photo realistic",
-                    image=img_pil,
-                    mask_image=mask_pil,
-                    guidance_scale=guidance_scale,
-                    num_inference_steps=steps
-                ).images[0]
-                return result
+                if str(current_device) == "cpu":
+                    print("Inpainting model is on CPU, keeping it there for stability")
+                    infer_device = "cpu"
+                else:
+                    print("Using MPS for inpainting")
+                    infer_device = "mps"
             else:
-                # Fall back to OpenCV inpainting
-                inpainted = cv2.inpaint(img_np, (mask_np*255).astype(np.uint8), 3, cv2.INPAINT_TELEA)
+                # Use whatever device was configured
+                infer_device = self.device
             
-            # Convert back to PIL if we got numpy array
-            if isinstance(inpainted, np.ndarray):
-                return Image.fromarray(inpainted)
-            return inpainted
+            # Create prompt for inpainting
+            # Empty prompt works fine for structural inpainting
+            prompt = "a high-resolution colorful image"
             
+            try:
+                # Setup the inpainting parameters
+                pil_img = Image.fromarray(img_np)
+                pil_mask = Image.fromarray(mask_np)
+                
+                # Set image guidance scale
+                self.inpaint_model.set_progress_bar_config(disable=True)
+                
+                # Try inpainting with error handling
+                try:
+                    # For inference, make sure model is on the right device
+                    if using_mps and infer_device == "mps":
+                        # Special handling for MPS
+                        self.inpaint_model.to("mps")
+                    
+                    print(f"Running inpainting on device: {infer_device}")
+                    img_inpainted = self.inpaint_model(
+                        prompt=prompt,
+                        image=pil_img,
+                        mask_image=pil_mask,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance_scale
+                    ).images[0]
+                    
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    print(f"Error during inpainting: {error_msg}")
+                    
+                    if "Input type" in error_msg and "weight type" in error_msg and using_mps:
+                        print("MPS tensor type mismatch, falling back to CPU")
+                        # Move model to CPU and retry
+                        self.inpaint_model.to("cpu")
+                        
+                        img_inpainted = self.inpaint_model(
+                            prompt=prompt,
+                            image=pil_img,
+                            mask_image=pil_mask,
+                            num_inference_steps=steps,
+                            guidance_scale=guidance_scale
+                        ).images[0]
+                    elif "CUDA out of memory" in error_msg:
+                        # Handle out of VRAM error
+                        print("CUDA out of memory. Using basic inpainting instead")
+                        mask_cv = mask_np.astype(np.uint8)
+                        from_cv = cv2.inpaint(img_np, mask_cv, 3, cv2.INPAINT_TELEA)
+                        return from_cv
+                    else:
+                        # Other runtime error - re-raise
+                        raise
+                
+                # Convert to numpy and return
+                inpaint_result = np.array(img_inpainted)
+                return inpaint_result
+                
+            except Exception as e:
+                print(f"Error during diffusion inpainting: {e}")
+                import traceback
+                traceback.print_exc()
+                print("Falling back to basic inpainting")
+                mask_cv = mask_np.astype(np.uint8)
+                from_cv = cv2.inpaint(img_np, mask_cv, 3, cv2.INPAINT_TELEA)
+                return from_cv
+                
         except Exception as e:
-            print(f"Error in inpaint_diffusion: {e}")
-            # Fall back to OpenCV inpainting
-            img_np = np.array(img_pil)
-            mask_np = np.array(mask_pil)
-            inpainted = cv2.inpaint(img_np, (mask_np).astype(np.uint8), 3, cv2.INPAINT_TELEA)
-            return Image.fromarray(inpainted)
+            print(f"Critical error in inpainting: {e}")
+            import traceback
+            traceback.print_exc()
+            # If everything fails, return original image
+            return np.array(img_pil)
 
     def set_color_quality(self, high_color_quality=True, apply_dithering=True, dithering_level=1.0):
         """Set parameters for color quality enhancement"""

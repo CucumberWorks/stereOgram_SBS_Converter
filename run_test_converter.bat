@@ -1,6 +1,0 @@
-@echo off
-echo Running Stereo3D Converter Test...
-python test_converter.py
-echo.
-echo Press any key to exit...
-pause > nul 

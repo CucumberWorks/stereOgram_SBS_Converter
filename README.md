@@ -42,9 +42,10 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
    pip install -r requirements.txt
    ```
 
-3. Create a `.env` file in the root directory with your Discord bot token:
+3. Create a `.env` file with your Discord Bot Token (if using Discord bot):
    ```
-   DISCORD_BOT_TOKEN=your_discord_bot_token_here
+   cp .env.example .env
+   # Edit the .env file with your token
    ```
 
 4. Model weights:
@@ -77,48 +78,80 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
 
 ## Usage
 
-### GUI Interface
+### Web GUI
 
-Run the GUI interface using:
-
-```bash
-python gradio_interface.py
-```
-
-Or use the convenience batch file (Windows only):
+Run the web interface using:
 
 ```bash
-run_stereogram_sbs3d_gui.bat
+python stereogram_main.py --mode ui
 ```
 
-The GUI provides an intuitive web interface with the following features:
-- Initialize tab for selecting model size and settings
-- Image upload and processing options
-- Advanced settings for fine-tuning the conversion
-- Multiple output formats including SBS 3D and wiggle GIF
+Or simply:
+
+```bash
+python stereogram_main.py
+```
 
 ### Discord Bot
 
 Run the Discord bot using:
 
 ```bash
-python discord_stereo_bot.py
+python stereogram_main.py --mode bot
 ```
 
-Or use the convenience batch file (Windows only):
+### Command Line Interface
+
+Process a single image using:
 
 ```bash
-run_discord_bot.bat
+python stereogram_main.py --mode cli --input path/to/your/image.jpg --output path/to/output/folder
 ```
 
-### Discord Bot Commands
+### Test Converter
 
-- `!sbs` - Convert an attached image to SBS 3D format
-- Use this command when replying to a message with an image or attach an image to your message
+Run the test converter with sample images:
+
+```bash
+python stereogram_main.py --mode test
+```
+
+## Project Structure
+
+```
+stereOgram_SBS_Converter/
+├── core/                     # Core processing modules
+│   ├── depth_anything_v2/    # Depth estimation model
+│   ├── advanced_infill.py    # Advanced inpainting techniques
+│   └── stereogram_sbs3d_converter.py  # Main converter class
+├── ui/                       # User interface components
+│   └── gradio_interface.py   # Gradio web interface
+├── debug/                    # Debugging tools
+│   └── debug_discord_bot.py  # Discord bot diagnostic utility
+├── utils/                    # Utility modules
+│   └── lut/                  # Look-up table implementations
+├── tools/                    # Helper tools and scripts
+│   └── test_converter.py     # Test converter utility
+├── scripts/                  # Additional batch files and scripts
+├── models/                   # Pre-trained model weights
+├── demo_images/              # Sample images for testing
+├── results/                  # Output folder for generated images
+├── docs/                     # Documentation
+├── stereogram_main.py        # Main entry point
+├── run_stereogram_ui.py      # Direct UI launcher
+├── run_discord_bot.bat       # Windows batch file for Discord bot (root for easy access)
+└── run_stereogram_sbs3d_gui.bat # Windows batch file for GUI (root for easy access)
+```
 
 ## Debugging
 
-If you encounter issues, refer to the [Debugging Guide](docs/DEBUGGING_GUIDE.md) for troubleshooting steps.
+If you encounter issues, you can run the diagnostic tool:
+
+```bash
+python stereogram_main.py --mode debug
+```
+
+For more detailed information, refer to the [Debugging Guide](docs/DEBUGGING_GUIDE.md).
 
 ## Configuration Options
 

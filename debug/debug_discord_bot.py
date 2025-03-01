@@ -48,9 +48,11 @@ def check_cuda():
                     print("    ⚠️ WARNING: Less than 8GB VRAM detected. Consider using 'vits' model")
             except Exception as e:
                 print(f"    ⚠️ Error getting memory info: {e}")
+        return True
     else:
         print("⚠️ CUDA is not available - processing will be much slower")
         print("   The bot will use CPU mode but performance will be limited")
+        return False
 
 def check_dependencies():
     """Check if all required packages are installed."""
@@ -80,9 +82,11 @@ def check_token():
         else:
             masked_token = token[:6] + "..." + token[-4:]
             print(f"✅ DISCORD_BOT_TOKEN is set (value: {masked_token})")
+        return True
     else:
         print("❌ DISCORD_BOT_TOKEN is not set in .env file")
         print("   Create a .env file in the project root with: DISCORD_BOT_TOKEN=your_token_here")
+        return False
 
 def check_models_directory():
     """Check if models directory exists and has any model files."""
@@ -92,7 +96,7 @@ def check_models_directory():
     if not os.path.exists(models_dir):
         print(f"ℹ️ Models directory does not exist: {models_dir}")
         print("   Directory will be created automatically when the bot first runs")
-        return
+        return False
     
     models = [f for f in os.listdir(models_dir) if f.endswith(".pth") or f.endswith(".pt")]
     
@@ -102,23 +106,41 @@ def check_models_directory():
             model_path = os.path.join(models_dir, model)
             size_mb = os.path.getsize(model_path) / (1024 * 1024)
             print(f"   - {model} ({size_mb:.2f} MB)")
+        return True
     else:
         print(f"ℹ️ No model files found in {models_dir}")
         print("   Models will be downloaded automatically when the bot first runs")
+        return False
 
 def main():
-    """Run all checks."""
-    print("\n🔍 STEREO3D DISCORD BOT DIAGNOSTIC\n")
+    """Run all debugging checks."""
+    print_section("stereOgram SBS Converter - Debug Mode")
     
-    check_python()
-    check_cuda()
-    check_dependencies()
-    check_token()
-    check_models_directory()
-    
-    print("\n🔍 DIAGNOSTIC COMPLETE\n")
-    print("If you encounter issues, refer to the Debugging Guide at docs/DEBUGGING_GUIDE.md")
-    print("For support, please file an issue on GitHub or reach out to the project maintainers.")
+    try:
+        # System checks
+        check_python()
+        gpu_available = check_cuda()
+        check_dependencies()
+        token_valid = check_token()
+        models_available = check_models_directory()
+        
+        # Display summary
+        print_section("Summary")
+        print(f"GPU Available: {'Yes' if gpu_available else 'No'}")
+        print(f"Token Valid: {'Yes' if token_valid else 'No'}")
+        print(f"Models Available: {'Yes' if models_available else 'No'}")
+        
+        if not token_valid:
+            print("\nWARNING: Discord bot token is not configured correctly.")
+        
+        if not models_available:
+            print("\nWARNING: Model files are missing. They will be downloaded automatically when running the application.")
+        
+        print("\nDebug completed successfully. If you're experiencing issues, please review the output above.")
+        return 0
+    except Exception as e:
+        print(f"Error during debug: {e}")
+        return 1
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 

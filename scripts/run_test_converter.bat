@@ -1,5 +1,5 @@
 @echo off
-echo Starting stereOgram SBS Converter Discord Bot...
+echo Running stereOgram SBS Converter Test...
 echo.
 
 rem Change to the directory where this batch file is located
@@ -13,8 +13,8 @@ if %ERRORLEVEL% NEQ 0 (
     goto end
 )
 
-rem Run the Discord bot
-python stereogram_main.py --mode bot
+rem Run the test converter
+python stereogram_main.py --mode test
 
 :end
 pause 

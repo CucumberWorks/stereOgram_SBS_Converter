@@ -185,14 +185,45 @@ class DepthAnythingV2(nn.Module):
     
     @torch.no_grad()
     def infer_image(self, raw_image, input_size=518):
+        """
+        Infer a single image.
+        Args:
+            raw_image: numpy array, (H, W, 3), BGR format (OpenCV default)
+            input_size: int, input resolution
+        Returns:
+            depth_map: numpy array, (H, W), predicted depth map
+        """
+        # Defer device decision until after image is prepared
         image, (h, w) = self.image2tensor(raw_image, input_size)
         
-        depth = self.forward(image)
+        # Detect if MPS is being used, check for tensor type consistency
+        if str(image.device).startswith('mps'):
+            # Ensure model is on same device as input
+            current_device = next(self.parameters()).device
+            if str(current_device) != str(image.device):
+                print(f"Moving model from {current_device} to {image.device} for inference")
+                self.to(image.device)
         
+        # Run the model
+        try:
+            depth = self.forward(image)
+        except RuntimeError as e:
+            # If we get an MPS-related type mismatch error
+            if "Input type" in str(e) and "weight type" in str(e):
+                print("Detected MPS tensor type mismatch, falling back to CPU")
+                # Move everything to CPU and retry
+                cpu_device = torch.device("cpu")
+                self.to(cpu_device)
+                image = image.to(cpu_device)
+                depth = self.forward(image)  # Retry on CPU
+            else:
+                raise  # Re-raise other exceptions
+        
+        # Use the original interpolation method 
         depth = F.interpolate(depth[:, None], (h, w), mode="bilinear", align_corners=True)[0, 0]
         
         return depth.cpu().numpy()
-    
+
     def image2tensor(self, raw_image, input_size=518):        
         transform = Compose([
             Resize(

@@ -1,0 +1,1013 @@
+import os
+import gradio as gr
+from gradio import EventData, SelectData
+import cv2
+import numpy as np
+import torch
+import time
+from PIL import Image
+import imageio
+from core.stereogram_sbs3d_converter import StereogramSBS3DConverter
+from core.advanced_infill import AdvancedInfillTechniques
+import gc
+import multiprocessing as mp
+from functools import partial
+import numba
+
+# Create results directory if it doesn't exist
+os.makedirs("results", exist_ok=True)
+
+# Initialize the converter with default settings
+converter = None
+stored_depth_map = None  # Will store the depth map after first generation
+stored_depth_colored = None  # Will store the colored visualization
+cached_depth_gray = None  # Will store the grayscale depth for faster focal plane updates
+cached_depth_height = None  # Will store the dimensions for faster processing
+cached_depth_width = None
+base_depth_image = None  # Store the base color depth image without overlays
+original_input_image = None  # Store the original input image for overlay
+
+# Create global variables to store cached visualization elements
+cached_diagonal_pattern = None
+cached_legend_template = None
+
+def initialize_converter(depth_model_type, model_size, use_advanced_infill, max_resolution, low_memory_mode):
+    global converter
+    try:
+        converter = StereogramSBS3DConverter(
+            use_advanced_infill=use_advanced_infill,
+            depth_model_type=depth_model_type,
+            model_size=model_size,
+            max_resolution=int(max_resolution),
+            low_memory_mode=low_memory_mode
+        )
+        
+        # Report GPU info if available
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # VRAM in GB
+            return f"Using GPU: {gpu_name} with {vram:.1f} GB VRAM\nInitialized with {model_size} model"
+        elif torch.backends.mps.is_available():
+            message = f"Using Apple MPS (Metal Performance Shaders) with {model_size} model"
+            if use_advanced_infill:
+                message += "\n\nNote: If you encounter errors with advanced inpainting on Apple Silicon,"
+                message += "\nconsider disabling advanced inpainting, or edit core/stereogram_sbs3d_converter.py"
+                message += "\nto uncomment the line: self.use_advanced_infill = False"
+            return message
+        else:
+            return "No GPU detected - using CPU mode"
+    except Exception as e:
+        message = f"Error initializing converter: {str(e)}\n"
+        message += "The tool will still attempt to function with limited capabilities."
+        print(message)
+        return message
+
+def generate_3d_image(left, right):
+    """Generate red-cyan anaglyph image from left and right views"""
+    # Make sure both images have the same height
+    h_left, w_left = left.shape[:2]
+    h_right, w_right = right.shape[:2]
+    
+    if h_left != h_right:
+        # Resize the smaller image to match the height of the larger one
+        if h_left < h_right:
+            aspect_ratio = w_left / h_left
+            new_height = h_right
+            new_width = int(new_height * aspect_ratio)
+            left = cv2.resize(left, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+        else:
+            aspect_ratio = w_right / h_right
+            new_height = h_left
+            new_width = int(new_height * aspect_ratio)
+            right = cv2.resize(right, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+    
+    # Get dimensions of resized images
+    h_left, w_left = left.shape[:2]
+    h_right, w_right = right.shape[:2]
+    
+    # Create a blank output image
+    output_width = max(w_left, w_right)
+    output = np.zeros((h_left, output_width, 3), dtype=np.uint8)
+    
+    # Convert images to BGR for processing if they aren't already
+    if len(left.shape) == 2:
+        left = cv2.cvtColor(left, cv2.COLOR_GRAY2BGR)
+    if len(right.shape) == 2:
+        right = cv2.cvtColor(right, cv2.COLOR_GRAY2BGR)
+    
+    # Create red-cyan anaglyph exactly as test_with_demo.py does
+    # OpenCV uses BGR order
+    output[:, :, 0] = right[:, :, 0]  # Blue channel from right eye
+    output[:, :, 1] = right[:, :, 1]  # Green channel from right eye
+    output[:, :, 2] = left[:, :, 2]   # Red channel from left eye
+    
+    return output
+
+def generate_sbs_3d(left_view, right_view):
+    """Generate side-by-side 3D image from left and right views"""
+    # Get dimensions
+    h, w = left_view.shape[:2]
+    
+    # Create side-by-side image
+    sbs_3d = np.zeros((h, w * 2, 3), dtype=np.uint8)
+    sbs_3d[:, :w, :] = left_view
+    sbs_3d[:, w:, :] = right_view
+    
+    return sbs_3d
+
+def generate_depth_map(image):
+    """Generate depth map once and store it"""
+    global converter, stored_depth_map, stored_depth_colored, cached_depth_gray, cached_depth_height, cached_depth_width, base_depth_image, original_input_image
+    
+    if converter is None:
+        return None, "Converter not initialized. Please initialize first."
+    
+    try:
+        # Convert to numpy array (OpenCV format)
+        if isinstance(image, np.ndarray):
+            img = image.copy()
+        else:
+            img = np.array(image)
+            
+        # Make sure we're working with BGR (OpenCV format)
+        if img.shape[2] == 4:  # If RGBA, convert to BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+        elif img.shape[2] == 3:  # If RGB (from Gradio), convert to BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+        # Store original input image for visualization overlay
+        original_input_image = img.copy()
+        
+        # Generate depth map
+        start_time = time.time()
+        stored_depth_map = converter.estimate_depth(img)
+        stored_depth_colored = converter.visualize_depth(stored_depth_map)
+        base_depth_image = stored_depth_colored.copy()  # Store a copy of the original colored depth map
+        processing_time = time.time() - start_time
+        
+        # Pre-calculate grayscale depth for faster focal plane visualization
+        if stored_depth_map.max() > 1.0:
+            normalized_depth = stored_depth_map / stored_depth_map.max()
+        else:
+            normalized_depth = stored_depth_map.copy()
+            
+        cached_depth_gray = (normalized_depth * 255).astype(np.uint8)
+        cached_depth_height, cached_depth_width = cached_depth_gray.shape[:2]
+        
+        # Create an initial visualization with the focal plane at default values
+        focal_viz, _ = update_focal_plane_visualization(0.5, 0.1)
+        
+        # Return the visualization with the focal plane overlay
+        return focal_viz, f"Depth map generated in {processing_time:.2f} seconds"
+    
+    except Exception as e:
+        error_message = f"Error generating depth map: {str(e)}"
+        print(error_message)
+        return None, error_message
+
+def create_diagonal_pattern(height, width, line_spacing=10, line_thickness=1, color=(255, 255, 255)):
+    """Create a diagonal line pattern image for out-of-focus areas"""
+    pattern = np.zeros((height, width, 3), dtype=np.uint8)
+    
+    # Draw diagonal lines
+    for i in range(-height, width + height, line_spacing):
+        cv2.line(pattern, (i, 0), (i + height, height), color, line_thickness)
+    
+    return pattern
+
+# Numba-accelerated function for ultra-fast color mapping
+@numba.njit(parallel=True, fastmath=True, cache=True)
+def apply_color_mapping_numba(depth_array, lower_bound_val, upper_bound_val, focal_distance_val):
+    """JIT-compiled function for ultra-fast color mapping"""
+    h, w = depth_array.shape
+    result = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    for i in numba.prange(h):
+        for j in range(w):
+            depth_val = depth_array[i, j]
+            
+            # In-focus area (white)
+            if lower_bound_val <= depth_val <= upper_bound_val:
+                result[i, j, 0] = 255  # B
+                result[i, j, 1] = 255  # G
+                result[i, j, 2] = 255  # R
+                
+                # Exact focal point (yellow)
+                if abs(depth_val - focal_distance_val) <= 1:
+                    result[i, j, 0] = 0    # B
+                    result[i, j, 1] = 255  # G
+                    result[i, j, 2] = 255  # R
+            
+            # Near field (red)
+            elif depth_val < lower_bound_val:
+                intensity = 255 - (depth_val * 255 // lower_bound_val) if lower_bound_val > 0 else 255
+                result[i, j, 2] = intensity  # R
+            
+            # Far field (blue)
+            else:  # depth_val > upper_bound_val
+                max_depth = 255
+                intensity = ((depth_val - upper_bound_val) * 255 // (max_depth - upper_bound_val)) if max_depth > upper_bound_val else 255
+                result[i, j, 0] = intensity  # B
+                
+    return result
+
+def process_chunk(chunk_data):
+    """Process a chunk of the depth map in parallel"""
+    chunk, start_row, lower_bound_val, upper_bound_val, focal_distance_val = chunk_data
+    return apply_color_mapping_numba(chunk, lower_bound_val, upper_bound_val, focal_distance_val), start_row
+
+def update_focal_plane_visualization(first_arg=0.5, second_arg=0.1, depth_map=None):
+    """Depth-aware visualization with color overlay on original image:
+    - Far areas (depth=0) are blue tinted
+    - Near areas (depth=1) are red tinted
+    - In-focus areas retain original image colors
+    """
+    global stored_depth_map, cached_depth_gray, base_depth_image, original_input_image
+    
+    # Check if first_arg is a depth map (numpy array)
+    if isinstance(first_arg, np.ndarray):
+        depth_gray = first_arg
+        focal_distance = second_arg
+        focal_thickness = depth_map if depth_map is not None else 0.1
+    else:
+        # Normal usage
+        focal_distance = first_arg
+        focal_thickness = second_arg
+        depth_gray = depth_map if depth_map is not None else cached_depth_gray
+    
+    if depth_gray is None and (stored_depth_map is None or cached_depth_gray is None):
+        return None, "Please generate depth map first"
+    
+    try:
+        start_time = time.time()
+        
+        # Calculate focal plane boundaries
+        half_thickness = focal_thickness / 2.0
+        lower_bound = max(0, focal_distance - half_thickness)
+        upper_bound = min(1.0, focal_distance + half_thickness)
+        
+        # Convert to 0-255 range for direct comparison
+        lower_bound_val = int(lower_bound * 255)
+        upper_bound_val = int(upper_bound * 255)
+        
+        # Check if we need to create a new LUT or can reuse cached one
+        if not hasattr(update_focal_plane_visualization, 'last_params') or \
+           update_focal_plane_visualization.last_params != (lower_bound_val, upper_bound_val):
+            
+            # Create a 256×3 overlay LUT (for B,G,R format)
+            # This will be used to determine which areas get which tint
+            lut = np.zeros((256, 3), dtype=np.uint8)
+            
+            # REVERSED DEPTH INTERPRETATION: 0=far (blue), 1=near (red)
+            
+            # Blue for far field (depth values closer to 0)
+            if lower_bound_val > 0:
+                # Create a blue tint that fades as it approaches the in-focus zone
+                blue_mask = np.zeros((lower_bound_val, 3), dtype=np.uint8)
+                blue_mask[:, 0] = np.linspace(180, 60, lower_bound_val, dtype=np.uint8)  # Blue channel
+                lut[:lower_bound_val] = blue_mask
+            
+            # No tint for in-focus area (keep original image colors)
+            lut[lower_bound_val:upper_bound_val+1] = [0, 0, 0]  # No tint
+            
+            # Red for near field (depth values closer to 1)
+            if upper_bound_val < 255:
+                # Create a red tint that intensifies as it gets further from the in-focus zone
+                red_range = 255 - upper_bound_val
+                if red_range > 0:
+                    red_mask = np.zeros((red_range, 3), dtype=np.uint8)
+                    red_mask[:, 2] = np.linspace(60, 180, red_range, dtype=np.uint8)  # Red channel
+                    lut[upper_bound_val+1:] = red_mask
+            
+            # Cache the LUT for reuse
+            update_focal_plane_visualization.cached_lut = lut
+            update_focal_plane_visualization.last_params = (lower_bound_val, upper_bound_val)
+        else:
+            # Reuse the cached LUT
+            lut = update_focal_plane_visualization.cached_lut
+        
+        # Use the original input image as the base for visualization
+        if original_input_image is not None:
+            # Resize original image to match depth map dimensions if needed
+            if (original_input_image.shape[0] != depth_gray.shape[0] or
+                original_input_image.shape[1] != depth_gray.shape[1]):
+                base_image = cv2.resize(original_input_image, 
+                                     (depth_gray.shape[1], depth_gray.shape[0]), 
+                                     interpolation=cv2.INTER_LANCZOS4)
+            else:
+                base_image = original_input_image.copy()
+        else:
+            # Fallback to depth visualization if original image is not available
+            if base_depth_image is None:
+                base_image = cv2.applyColorMap(depth_gray, cv2.COLORMAP_INFERNO)
+            else:
+                base_image = base_depth_image.copy()
+        
+        # Apply the color overlay
+        # Get the tint mask for each pixel from the LUT
+        tint_mask = lut[depth_gray]
+        
+        # Create a mask for areas that should be tinted (non-zero in the tint_mask)
+        areas_to_tint = np.any(tint_mask > 0, axis=2)
+        
+        # Apply the tint by blending the base image with the tint
+        result = base_image.copy()
+        
+        # Apply tint only to areas outside the focal plane
+        for c in range(3):  # For each color channel
+            # Add the tint to the original image in the corresponding areas
+            result[:,:,c] = np.where(areas_to_tint, 
+                                     np.clip(base_image[:,:,c] * 0.7 + tint_mask[:,:,c], 0, 255).astype(np.uint8), 
+                                     base_image[:,:,c])
+        
+        # Convert to RGB for Gradio display
+        result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+        
+        processing_time = time.time() - start_time
+        return result_rgb, f"Focal plane updated in {processing_time*1000:.1f} ms"
+    
+    except Exception as e:
+        error_message = f"Error updating focal plane: {str(e)}"
+        print(error_message)
+        return None, error_message
+
+def generate_depth_with_focal_plane(image, focal_distance=0.5):
+    """Generate depth map and visualize the focal plane"""
+    global stored_depth_map
+    
+    # If we don't have a stored depth map or this is a new image, generate it
+    if stored_depth_map is None:
+        depth_img, status = generate_depth_map(image)
+        if depth_img is None:
+            return None, status
+            
+    # Update the focal plane visualization
+    return update_focal_plane_visualization(focal_distance)
+
+def create_wiggle_gif(left_view, right_view, duration=0.15):
+    """Create a wiggle GIF alternating between left and right views to show 3D effect"""
+    # Make sure both images have the same dimensions
+    h_left, w_left = left_view.shape[:2]
+    h_right, w_right = right_view.shape[:2]
+    
+    if h_left != h_right or w_left != w_right:
+        # Resize right view to match left view
+        right_view = cv2.resize(right_view, (w_left, h_left), interpolation=cv2.INTER_LANCZOS4)
+    
+    # Convert from BGR to RGB for GIF
+    left_view_rgb = cv2.cvtColor(left_view, cv2.COLOR_BGR2RGB)
+    right_view_rgb = cv2.cvtColor(right_view, cv2.COLOR_BGR2RGB)
+    
+    # Create temporary file path
+    os.makedirs("results", exist_ok=True)
+    timestamp = int(time.time())
+    gif_path = f"results/wiggle_{timestamp}.gif"
+    
+    # Create GIF with alternating frames
+    frames = [left_view_rgb, right_view_rgb]
+    imageio.mimsave(gif_path, frames, duration=duration, loop=0)
+    
+    return gif_path
+
+def process_image(image, shift_factor, resolution, patch_size, patch_overlap, steps, cfg_scale, high_quality, debug_mode,
+                 apply_depth_blur=False, focal_distance=0.5, focal_thickness=0.1, blur_intensity=0.2, blur_radius=0.4):
+    global converter, stored_depth_map, stored_depth_colored
+    
+    if converter is None:
+        return None, None, None, None, None, "Converter not initialized. Please initialize first."
+    
+    if stored_depth_map is None:
+        return None, None, None, None, None, "Please generate depth map first"
+    
+    try:
+        # Convert to numpy array (OpenCV format)
+        if isinstance(image, np.ndarray):
+            img = image.copy()
+        else:
+            img = np.array(image)
+            
+        # Make sure we're working with BGR (OpenCV format)
+        if img.shape[2] == 4:  # If RGBA, convert to BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+        elif img.shape[2] == 3:  # If RGB (from Gradio), convert to BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+        h, w = img.shape[:2]
+        aspect_ratio = w / h
+        
+        # Determine processing resolution
+        if resolution == 720:
+            process_res_factor = 480 if not high_quality else 600
+        elif resolution == 1080:
+            process_res_factor = 720 if not high_quality else 900
+        elif resolution == 1440:
+            process_res_factor = 800 if not high_quality else 1000
+        elif resolution == 2160:
+            process_res_factor = 960 if not high_quality else 1200
+        else:
+            process_res_factor = 720 if not high_quality else 900  # Default
+        
+        # Generate progress message
+        progress_message = f"Processing image ({w}x{h}) with shift factor {shift_factor:.2f}..."
+        
+        # Use the stored depth map - don't regenerate
+        progress_message += f"\nUsing pre-generated depth map..."
+        depth_map = stored_depth_map
+        
+        # Use current visualization for depth map display
+        current_viz, _ = update_focal_plane_visualization(focal_distance, focal_thickness)
+        # Convert from RGB back to BGR for processing
+        depth_colored = cv2.cvtColor(current_viz, cv2.COLOR_RGB2BGR)
+        
+        # Determine processing resolution
+        proc_h = process_res_factor
+        proc_w = int(proc_h * aspect_ratio)
+        # Make divisible by 8
+        proc_w = proc_w - (proc_w % 8)
+        proc_h = proc_h - (proc_h % 8)
+        
+        # Resize image for processing
+        proc_img = cv2.resize(img, (proc_w, proc_h), interpolation=cv2.INTER_LANCZOS4)
+        
+        # Resize depth map to match processing resolution
+        depth_map_resized = cv2.resize(depth_map, (proc_w, proc_h), interpolation=cv2.INTER_NEAREST)
+        
+        # Set inpainting parameters
+        converter.set_inpainting_params(
+            steps=steps,
+            guidance_scale=cfg_scale,
+            patch_size=patch_size,
+            patch_overlap=patch_overlap
+        )
+        
+        # Set high_quality directly if possible
+        try:
+            converter.high_quality = high_quality
+        except:
+            pass
+        
+        # Generate stereo views
+        progress_message += f"\nGenerating stereo views with {int(shift_factor * proc_w)}px shift..."
+        start_time = time.time()
+        
+        if debug_mode:
+            # Use debug visualization mode with purple background
+            left_view, right_view, left_holes, right_holes = converter.generate_stereo_views_debug(
+                proc_img, depth_map_resized, shift_factor=shift_factor
+            )
+        else:
+            # Use normal mode
+            left_view, right_view, left_holes, right_holes = converter.generate_stereo_views(
+                proc_img, depth_map_resized, shift_factor=shift_factor
+            )
+        
+        progress_message += f"\nStereo views generated in {time.time() - start_time:.2f} seconds"
+        
+        # Fill holes in the stereo views
+        if converter.use_advanced_infill:
+            # Apply advanced inpainting
+            progress_message += f"\nFilling holes using advanced inpainting..."
+            start_time = time.time()
+            
+            if np.sum(left_holes) > 0:
+                progress_message += f"\nFilling left view holes ({np.sum(left_holes)} pixels)..."
+                left_inpainted = converter.fill_holes_preserving_originals(
+                    proc_img,  # Original image
+                    left_view, 
+                    left_holes,
+                    depth_map_resized,
+                    shift_factor=shift_factor,
+                    is_left_view=True
+                )
+                left_view = left_inpainted
+            
+            if np.sum(right_holes) > 0:
+                progress_message += f"\nFilling right view holes ({np.sum(right_holes)} pixels)..."
+                right_inpainted = converter.fill_holes_preserving_originals(
+                    proc_img,  # Original image
+                    right_view, 
+                    right_holes,
+                    depth_map_resized,
+                    shift_factor=shift_factor,
+                    is_left_view=False
+                )
+                right_view = right_inpainted
+                
+            progress_message += f"\nHole filling completed in {time.time() - start_time:.2f} seconds"
+        
+        # Create 2D image with depth blur
+        depth_blurred_2d = None
+        if apply_depth_blur:
+            # Convert normalized blur parameters to actual values
+            # Blur intensity: 0-1 to 0.1-5.0
+            blur_strength = 0.1 + (blur_intensity * 4.9)
+            
+            # Blur radius: 0-1 to 3-51 (odd numbers only)
+            max_blur_size = int(3 + (blur_radius * 48))
+            if max_blur_size % 2 == 0:  # Ensure odd number
+                max_blur_size = max_blur_size + 1
+            
+            progress_message += f"\nApplying depth-based blur (focal distance: {focal_distance:.2f}, thickness: {focal_thickness:.2f}, intensity: {blur_intensity:.2f}, radius: {blur_radius:.2f})..."
+            start_time = time.time()
+            
+            # Apply blur to the original 2D image based on depth map
+            depth_blurred_2d = converter.apply_depth_based_blur(
+                proc_img.copy(), depth_map_resized,
+                focal_distance=focal_distance,
+                focal_thickness=focal_thickness,
+                blur_strength=blur_strength,
+                max_blur_size=max_blur_size
+            )
+            
+            # Apply blur to both views based on the depth map for the stereo images
+            left_view = converter.apply_depth_based_blur(
+                left_view, depth_map_resized,
+                focal_distance=focal_distance,
+                focal_thickness=focal_thickness,
+                blur_strength=blur_strength, 
+                max_blur_size=max_blur_size
+            )
+            
+            right_view = converter.apply_depth_based_blur(
+                right_view, depth_map_resized,
+                focal_distance=focal_distance,
+                focal_thickness=focal_thickness,
+                blur_strength=blur_strength,
+                max_blur_size=max_blur_size
+            )
+            
+            progress_message += f"\nDepth-based blur applied in {time.time() - start_time:.2f} seconds"
+        else:
+            # If depth blur is not applied, use the original image as the output
+            depth_blurred_2d = proc_img.copy()
+        
+        # Determine output resolution
+        target_h = resolution
+        target_w = int(target_h * aspect_ratio)
+        
+        # Make width divisible by 2 for even dimensions
+        target_w = target_w - (target_w % 2)
+        
+        # Resize to output resolution
+        left_view_resize = cv2.resize(left_view, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+        right_view_resize = cv2.resize(right_view, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+        depth_blurred_2d_resize = cv2.resize(depth_blurred_2d, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+        
+        # Generate anaglyph output
+        anaglyph = generate_3d_image(left_view_resize, right_view_resize)
+        
+        # Generate side-by-side 3D output
+        sbs_3d = generate_sbs_3d(left_view_resize, right_view_resize)
+        
+        # Create wiggle GIF
+        wiggle_gif_path = create_wiggle_gif(left_view_resize, right_view_resize)
+        
+        progress_message += f"\nProcessing complete. Final output resolution: {target_w}x{target_h}"
+        
+        # Convert OpenCV images (BGR) to PIL for Gradio display (RGB)
+        # Only take the depth image part without the legend
+        if cached_depth_height is not None:
+            depth_colored_top = depth_colored[:cached_depth_height]
+            depth_colored_pil = Image.fromarray(cv2.cvtColor(depth_colored_top, cv2.COLOR_BGR2RGB))
+        else:
+            depth_colored_pil = Image.fromarray(cv2.cvtColor(depth_colored, cv2.COLOR_BGR2RGB))
+        
+        depth_blurred_2d_pil = Image.fromarray(cv2.cvtColor(depth_blurred_2d_resize, cv2.COLOR_BGR2RGB))
+        anaglyph_pil = Image.fromarray(cv2.cvtColor(anaglyph, cv2.COLOR_BGR2RGB))
+        sbs_3d_pil = Image.fromarray(cv2.cvtColor(sbs_3d, cv2.COLOR_BGR2RGB))
+        
+        # Save images to results directory
+        timestamp = int(time.time())
+        os.makedirs("results", exist_ok=True)
+        
+        # Save outputs with timestamp - using same format as test_with_demo.py
+        depth_path = f"results/depth_{timestamp}.jpg"
+        depth_blur_path = f"results/depth_blur_2d_{timestamp}.jpg"
+        anaglyph_path = f"results/anaglyph_{timestamp}.jpg"
+        sbs_path = f"results/sbs_{timestamp}.jpg"
+        
+        # Save files using cv2 to maintain correct colors in BGR format
+        cv2.imwrite(depth_path, depth_colored)
+        cv2.imwrite(depth_blur_path, depth_blurred_2d_resize)
+        cv2.imwrite(anaglyph_path, anaglyph)
+        cv2.imwrite(sbs_path, sbs_3d)
+        
+        progress_message += f"\nImages saved to results directory with timestamp {timestamp}."
+        
+        output_files = [depth_path, anaglyph_path, sbs_path, wiggle_gif_path, depth_blur_path]
+        
+        return depth_colored_pil, depth_blurred_2d_pil, anaglyph_pil, sbs_3d_pil, wiggle_gif_path, output_files, progress_message
+        
+    except Exception as e:
+        error_message = f"Error processing image: {str(e)}\nPlease try a different image or reinitialize the converter."
+        print(error_message)
+        import traceback
+        traceback.print_exc() 
+        return None, None, None, None, None, None, error_message
+
+def clear_torch_cache():
+    """Clear PyTorch CUDA cache"""
+    if converter is not None:
+        result = converter.clear_vram_cache()
+        return result
+    elif torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+        return "VRAM cache cleared (converter not initialized)"
+    elif torch.backends.mps.is_available():
+        gc.collect()
+        return "MPS memory cleared (garbage collection)"
+    else:
+        return "No GPU detected"
+
+def clear_stored_depth_map():
+    global stored_depth_map, stored_depth_colored, cached_depth_gray, cached_depth_height, cached_depth_width, base_depth_image, original_input_image
+    stored_depth_map = None
+    stored_depth_colored = None
+    cached_depth_gray = None
+    cached_depth_height = None
+    cached_depth_width = None
+    base_depth_image = None
+    original_input_image = None
+    return None, None, None, None, None, None, "Cleared stored depth map due to new image"
+
+def set_focal_distance_from_click(focal_distance, focal_thickness, evt=None):
+    """Handler for depth map click events to set focal plane"""
+    try:
+        print(f"Function called with focal_distance={focal_distance}, focal_thickness={focal_thickness}")
+        print(f"Event data type: {type(evt)}")
+        print(f"Event data content: {evt}")
+        
+        # Check if we have a cached depth map
+        if cached_depth_gray is None:
+            return focal_distance, None, "Please generate a depth map first."
+            
+        # If evt is None (happens with Gradio's initial call), just return the current values
+        if evt is None:
+            print("Event data is None, returning current values")
+            # Just update the visualization with current values
+            depth_map_with_plane, _ = update_focal_plane_visualization(focal_distance, focal_thickness)
+            return focal_distance, depth_map_with_plane, "Click on the depth map to set focal plane"
+        
+        # For click events in Gradio 5.x
+        if isinstance(evt, dict) and "index" in evt:
+            print(f"Got click coordinates from dict: {evt['index']}")
+            coords = evt["index"]
+        elif hasattr(evt, "index"):
+            print(f"Got click coordinates from object: {evt.index}")
+            coords = evt.index
+        else:
+            # Try to infer coordinates from various event data formats
+            print("Trying to infer coordinates from event data...")
+            if isinstance(evt, list) and len(evt) == 2:
+                coords = evt  # Direct coordinates
+                print(f"Inferring coords from list: {coords}")
+            elif isinstance(evt, dict):
+                # Try common attribute names
+                for key in ['index', 'target', 'coordinates', 'point', 'position', 'value']:
+                    if key in evt and isinstance(evt[key], (list, tuple)) and len(evt[key]) == 2:
+                        coords = evt[key]
+                        print(f"Inferring coords from dict key {key}: {coords}")
+                        break
+                else:
+                    # If we can't find coordinates, print entire event data and return
+                    print(f"Full event data: {evt}")
+                    return focal_distance, None, "Could not find coordinates in event data. Please try again."
+            else:
+                print(f"Unable to parse event data: {evt}")
+                return focal_distance, None, "Could not extract coordinates from event data. Please try again."
+        
+        # Process coordinates
+        try:
+            x, y = coords
+            print(f"Raw coordinates: x={x}, y={y}")
+            
+            # Get depth map dimensions
+            height, width = cached_depth_gray.shape
+            print(f"Depth map dimensions: {width}x{height}")
+            
+            # Convert coordinates to image space
+            # Check if coordinates are normalized or absolute
+            if isinstance(x, float) and isinstance(y, float) and 0 <= x <= 1 and 0 <= y <= 1:
+                # Normalized coordinates
+                x_img = int(x * width)
+                y_img = int(y * height)
+                print("Using normalized coordinates")
+            else:
+                # Absolute coordinates
+                x_img = int(x)
+                y_img = int(y) 
+                print("Using absolute coordinates")
+                
+            # Ensure coordinates are within bounds
+            x_img = max(0, min(x_img, width-1))
+            y_img = max(0, min(y_img, height-1))
+            
+            print(f"Image coordinates: x_img={x_img}, y_img={y_img}")
+            
+            # Get depth value
+            depth_val = cached_depth_gray[y_img, x_img]
+            print(f"Depth value at click point: {depth_val}")
+            
+            # Set new focal distance (normalized to 0-1 range to match slider)
+            new_focal_distance = float(depth_val) / 255.0
+            print(f"New focal distance (0-1 range): {new_focal_distance}")
+            
+            # Round to nearest step of 0.05 to match slider steps
+            new_focal_distance = round(new_focal_distance * 20) / 20
+            print(f"Rounded focal distance: {new_focal_distance}")
+            
+            # Update visualization
+            depth_map_with_plane, status = update_focal_plane_visualization(new_focal_distance, focal_thickness)
+            
+            if depth_map_with_plane is None:
+                return focal_distance, None, f"Error updating visualization: {status}"
+                
+            # IMPORTANT: Return the new focal distance as the first value to update the slider
+            print(f"Returning new focal distance: {new_focal_distance}")
+            return new_focal_distance, depth_map_with_plane, f"Focal plane updated to depth: {new_focal_distance:.2f}"
+            
+        except Exception as e:
+            print(f"Error processing coordinates: {e}")
+            import traceback
+            traceback.print_exc()
+            return focal_distance, None, f"Error: {str(e)}"
+    
+    except Exception as e:
+        print(f"Overall error: {e}")
+        import traceback
+        traceback.print_exc() 
+        return focal_distance, None, f"Error: {str(e)}"
+
+def build_interface():
+    with gr.Blocks(title="stereOgram SBS3D converter") as interface:
+        # Top-level UI
+        gr.Markdown("# stereOgram SBS3D converter")
+        gr.Markdown("Convert regular 2D images into stereo 3D formats using depth estimation")
+        
+        # Tab layout
+        with gr.Tabs() as tabs:
+            # Initialize tab
+            with gr.Tab("Initialize"):
+                with gr.Row():
+                    with gr.Column():
+                        depth_model = gr.Dropdown(
+                            choices=["depth_anything_v2"], 
+                            value="depth_anything_v2", 
+                            label="Depth Model"
+                        )
+                        model_size = gr.Dropdown(
+                            choices=["vits", "vitb", "vitl"], 
+                            value="vitb", 
+                            label="Model Size", 
+                            info="vits = smallest/fastest, vitb = medium/balanced, vitl = largest/best quality"
+                        )
+                        use_advanced = gr.Checkbox(
+                            value=False, 
+                            label="Use Advanced Inpainting", 
+                            info="Higher quality but more GPU memory"
+                        )
+                        max_res = gr.Slider(
+                            minimum=1024, 
+                            maximum=8192, 
+                            value=8192, 
+                            step=1024, 
+                            label="Max Resolution", 
+                            info="Maximum resolution for depth estimation"
+                        )
+                        low_memory = gr.Checkbox(
+                            value=True, 
+                            label="Low Memory Mode", 
+                            info="For GPUs with limited VRAM"
+                        )
+                        init_btn = gr.Button("Initialize Converter")
+                    
+                    with gr.Column():
+                        init_output = gr.Textbox(label="Initialization Status")
+                        clear_cache_btn = gr.Button("Clear VRAM Cache")
+            
+            # Convert tab  
+            with gr.Tab("Convert"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        input_image = gr.Image(label="Input Image", type="pil")
+                        gen_depth_btn = gr.Button("Generate Depth Map")
+                    
+                    with gr.Accordion("Basic Settings", open=True):
+                        resolution = gr.Dropdown(
+                            choices=[720, 1080, 1440, 2160], 
+                            value=1080, 
+                            label="Output Resolution", 
+                            info="Output resolution height (pixels)"
+                        )
+                        shift_factor = gr.Slider(
+                            minimum=0.01, 
+                            maximum=0.2, 
+                            value=0.03, 
+                            step=0.005, 
+                            label="Shift Factor", 
+                            info="Stereo shift amount (0.01-0.2)"
+                        )
+                    
+                    with gr.Accordion("Configure Blur & Generate Output", open=True):
+                        apply_depth_blur = gr.Checkbox(
+                            value=True,
+                            label="Apply Depth-Based Blur",
+                            info="Adds depth of field effect based on the depth map"
+                        )
+                        blur_intensity = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=0.2,
+                            step=0.05,
+                            label="Blur Intensity",
+                            info="Controls how strongly the blur effect is applied (0=subtle, 1=strong)"
+                        )
+                        blur_radius = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=0.4,
+                            step=0.05,
+                            label="Blur Radius",
+                            info="Controls how far the blur spreads (0=tight, 1=wide)"
+                        )
+                        
+                        with gr.Accordion("Advanced Processing Settings", open=False):
+                            patch_size = gr.Slider(
+                                minimum=64, 
+                                maximum=512, 
+                                value=384, 
+                                step=32, 
+                                label="Patch Size", 
+                                info="Size of patches for inpainting"
+                            )
+                            patch_overlap = gr.Slider(
+                                minimum=16, 
+                                maximum=256, 
+                                value=128, 
+                                step=16, 
+                                label="Patch Overlap", 
+                                info="Overlap between patches"
+                            )
+                            steps = gr.Slider(
+                                minimum=10, 
+                                maximum=50, 
+                                value=30, 
+                                step=5, 
+                                label="Inference Steps", 
+                                info="More steps = better quality, slower"
+                            )
+                            cfg_scale = gr.Slider(
+                                minimum=1.0, 
+                                maximum=15.0, 
+                                value=7.5, 
+                                step=0.5, 
+                                label="Guidance Scale", 
+                                info="How closely to follow the prompt"
+                            )
+                            high_quality = gr.Checkbox(
+                                value=True, 
+                                label="High Quality Mode", 
+                                info="Better anti-banding, smoother output"
+                            )
+                            debug_mode = gr.Checkbox(
+                                value=False, 
+                                label="Debug Mode", 
+                                info="Show occlusion areas with purple"
+                            )
+                        
+                        process_btn = gr.Button("Generate Stereo Image")
+                    
+                    clear_btn = gr.Button("Clear Images")
+                
+                with gr.Column(scale=1):
+                    depth_map = gr.Image(
+                        label="Depth Map Visualization", 
+                        elem_id="depth_map_viz",
+                        show_download_button=True,
+                        show_label=True,
+                        interactive=True,
+                        height=400,
+                        width=500,
+                        type="numpy",
+                        sources=["upload"]
+                    )
+                    
+                    # Make the instructions more prominent
+                    depth_click_instructions = gr.Markdown("### 👆 Click on the depth map to set the focal plane at that depth")
+                    
+                    # Focal plane controls directly under depth map
+                    with gr.Accordion("Focal Plane Adjustments", open=True):
+                        focal_distance = gr.Slider(
+                            minimum=0.0,
+                            maximum=1.0,
+                            value=0.5,
+                            step=0.05,
+                            label="Focal Distance",
+                            info="Distance to keep in focus (0=farthest, 1=nearest)"
+                        )
+                        
+                        focal_thickness = gr.Slider(
+                            minimum=0.05,
+                            maximum=0.5,
+                            value=0.1,
+                            step=0.05,
+                            label="Focal Thickness",
+                            info="Thickness of the in-focus region"
+                        )
+                    
+                    depth_status = gr.Textbox(label="Status")
+                    
+                    output_tabs = gr.Tabs()
+                    with output_tabs:
+                        with gr.TabItem("2D with Depth Blur"):
+                            depth_blur_2d = gr.Image(label="2D with Depth Blur")
+                        with gr.TabItem("Side-by-Side"):
+                            sbs = gr.Image(label="Side-by-Side Stereo")
+                        with gr.TabItem("Red-Cyan Anaglyph"):
+                            anaglyph = gr.Image(label="Red-Cyan Anaglyph")
+                        with gr.TabItem("Wiggle GIF"):
+                            wiggle_gif = gr.Image(label="Wiggle GIF")
+                    
+                    download_files = gr.File(label="Download Results")
+                    progress = gr.Textbox(label="Processing Status")
+        
+        # Connect event handlers
+        init_btn.click(
+            initialize_converter, 
+            inputs=[depth_model, model_size, use_advanced, max_res, low_memory], 
+            outputs=[init_output]
+        )
+        
+        clear_cache_btn.click(
+            clear_torch_cache, 
+            inputs=[],
+            outputs=[init_output]
+        )
+        
+        gen_depth_btn.click(
+            generate_depth_map,
+            inputs=[input_image],
+            outputs=[depth_map, depth_status]
+        )
+        
+        focal_distance.change(
+            update_focal_plane_visualization,
+            inputs=[focal_distance, focal_thickness],
+            outputs=[depth_map, depth_status]
+        )
+        
+        focal_thickness.change(
+            update_focal_plane_visualization,
+            inputs=[focal_distance, focal_thickness],
+            outputs=[depth_map, depth_status]
+        )
+        
+        # Replace select event with click event
+        depth_map.click(
+            fn=set_focal_distance_from_click,
+            inputs=[focal_distance, focal_thickness],
+            outputs=[focal_distance, depth_map, depth_status],
+            show_progress="hidden"  # Improve response time perception
+        )
+        
+        # Define a local version of clear_stored_depth_map for the UI
+        def _clear_stored_depth_map():
+            global stored_depth_map, stored_depth_colored, cached_depth_gray, cached_depth_height, cached_depth_width, base_depth_image, original_input_image
+            stored_depth_map = None
+            stored_depth_colored = None
+            cached_depth_gray = None
+            cached_depth_height = None
+            cached_depth_width = None
+            base_depth_image = None
+            original_input_image = None
+            return None, None, None, None, None, None, "Cleared stored depth map due to new image"
+        
+        process_btn.click(
+            process_image, 
+            inputs=[
+                input_image, shift_factor, resolution, patch_size, 
+                patch_overlap, steps, cfg_scale, high_quality, debug_mode,
+                apply_depth_blur, focal_distance, focal_thickness, blur_intensity, blur_radius
+            ], 
+            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, download_files, progress]
+        )
+        
+        clear_btn.click(
+            _clear_stored_depth_map,
+            inputs=[],
+            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, download_files, progress]
+        )
+        
+        input_image.change(
+            _clear_stored_depth_map,
+            inputs=[],
+            outputs=[depth_map, depth_blur_2d, anaglyph, sbs, wiggle_gif, download_files, progress]
+        )
+    
+    return interface
+
+# Launch the Gradio app
+if __name__ == "__main__":
+    interface = build_interface()
+    interface.launch(share=True) 
