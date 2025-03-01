@@ -870,15 +870,38 @@ def process_image(image, shift_factor, resolution, patch_size, patch_overlap, st
         anaglyph_path = f"results/anaglyph_{timestamp}.jpg"
         sbs_path = f"results/sbs_{timestamp}.jpg"
         
+        # Add raw depth map output - save as both JPEG (for viewing) and 16-bit PNG (for processing)
+        raw_depth_jpg_path = f"results/raw_depth_{timestamp}.jpg"
+        raw_depth_png_path = f"results/raw_depth_{timestamp}.png"
+        
         # Save files using cv2 to maintain correct colors in BGR format
         cv2.imwrite(depth_path, depth_colored)
         cv2.imwrite(depth_blur_path, depth_blurred_2d_resize)
         cv2.imwrite(anaglyph_path, anaglyph)
         cv2.imwrite(sbs_path, sbs_3d)
         
+        # Save the raw depth map (ensure it's properly normalized first)
+        # Get the original raw depth map from stored variable
+        if cached_depth_gray is not None:
+            # Save normalized 8-bit version as JPEG for easy viewing
+            cv2.imwrite(raw_depth_jpg_path, cached_depth_gray)
+            
+            # For the raw depth values, we need to preserve precision
+            # If stored_depth_map has floating point values, save as 16-bit PNG 
+            if stored_depth_map is not None:
+                # Normalize to 0-65535 range for 16-bit PNG
+                depth_float = stored_depth_map.copy()
+                if depth_float.max() > 0:
+                    depth_float = depth_float / depth_float.max() * 65535
+                # Convert to 16-bit unsigned integer
+                depth_16bit = depth_float.astype(np.uint16)
+                # Save as 16-bit PNG for maximum precision
+                cv2.imwrite(raw_depth_png_path, depth_16bit, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+                progress_message += f"\nRaw depth map saved as 16-bit PNG for reference."
+        
         progress_message += f"\nImages saved to results directory with timestamp {timestamp}."
         
-        output_files = [depth_path, anaglyph_path, sbs_path, wiggle_gif_path, depth_blur_path]
+        output_files = [depth_path, anaglyph_path, sbs_path, wiggle_gif_path, depth_blur_path, raw_depth_jpg_path, raw_depth_png_path]
         
         return depth_colored_pil, depth_blurred_2d_pil, anaglyph_pil, sbs_3d_pil, wiggle_gif_path, output_files, progress_message
         
