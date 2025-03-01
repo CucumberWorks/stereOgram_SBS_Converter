@@ -475,26 +475,68 @@ def update_focal_plane_visualization(first_arg=0.5, second_arg=0.1, depth_map=No
             # Reuse the cached LUT
             lut = update_focal_plane_visualization.cached_lut
         
+        # OPTIMIZATION: Downsample depth map and image for preview (max 720p)
+        preview_depth_gray = depth_gray.copy()
+        MAX_PREVIEW_DIMENSION = 720  # Maximum dimension for preview (720p)
+        
+        # Calculate if resizing is needed for preview
+        original_height, original_width = depth_gray.shape[:2]
+        need_resize = max(original_height, original_width) > MAX_PREVIEW_DIMENSION
+        
+        # Store original dimensions for later reference
+        original_dims = (original_height, original_width)
+        preview_dims = original_dims
+        
+        # Resize for preview if needed
+        if need_resize:
+            # Calculate new dimensions maintaining aspect ratio
+            if original_width >= original_height:
+                # Landscape orientation
+                preview_width = MAX_PREVIEW_DIMENSION
+                preview_height = int(original_height * (MAX_PREVIEW_DIMENSION / original_width))
+            else:
+                # Portrait orientation
+                preview_height = MAX_PREVIEW_DIMENSION
+                preview_width = int(original_width * (MAX_PREVIEW_DIMENSION / original_height))
+            
+            # Store preview dimensions
+            preview_dims = (preview_height, preview_width)
+            
+            # Resize depth map for preview
+            preview_depth_gray = cv2.resize(depth_gray, (preview_width, preview_height), 
+                                         interpolation=cv2.INTER_AREA)
+        
         # Use the original input image as the base for visualization
         if original_input_image is not None:
-            # Resize original image to match depth map dimensions if needed
-            if (original_input_image.shape[0] != depth_gray.shape[0] or
-                original_input_image.shape[1] != depth_gray.shape[1]):
-                base_image = cv2.resize(original_input_image, 
-                                     (depth_gray.shape[1], depth_gray.shape[0]), 
-                                     interpolation=cv2.INTER_LANCZOS4)
+            if need_resize:
+                # Resize original image to match preview dimensions
+                base_image = cv2.resize(original_input_image, (preview_width, preview_height), 
+                                     interpolation=cv2.INTER_AREA)
             else:
-                base_image = original_input_image.copy()
+                # Resize original image to match depth map dimensions if needed
+                if (original_input_image.shape[0] != depth_gray.shape[0] or
+                    original_input_image.shape[1] != depth_gray.shape[1]):
+                    base_image = cv2.resize(original_input_image, 
+                                         (depth_gray.shape[1], depth_gray.shape[0]), 
+                                         interpolation=cv2.INTER_LANCZOS4)
+                else:
+                    base_image = original_input_image.copy()
         else:
             # Fallback to depth visualization if original image is not available
-            if base_depth_image is None:
-                base_image = cv2.applyColorMap(depth_gray, cv2.COLORMAP_INFERNO)
+            if need_resize and base_depth_image is not None:
+                base_image = cv2.resize(base_depth_image, (preview_width, preview_height), 
+                                     interpolation=cv2.INTER_AREA)
+            elif base_depth_image is None:
+                base_image = cv2.applyColorMap(preview_depth_gray, cv2.COLORMAP_INFERNO)
             else:
                 base_image = base_depth_image.copy()
+                if need_resize:
+                    base_image = cv2.resize(base_image, (preview_width, preview_height), 
+                                         interpolation=cv2.INTER_AREA)
         
         # Apply the color overlay
         # Get the tint mask for each pixel from the LUT
-        tint_mask = lut[depth_gray]
+        tint_mask = lut[preview_depth_gray]
         
         # Create a mask for areas that should be tinted (non-zero in the tint_mask)
         areas_to_tint = np.any(tint_mask > 0, axis=2)
@@ -512,11 +554,17 @@ def update_focal_plane_visualization(first_arg=0.5, second_arg=0.1, depth_map=No
         # Re-add visual indicators if they exist
         if last_clicked_point is not None or last_detected_faces is not None:
             # Get dimensions for size calculations
-            height, width = depth_gray.shape[:2]
+            height, width = preview_dims
             
             # Re-draw clicked point if it exists
             if last_clicked_point is not None:
                 x_img, y_img = last_clicked_point
+                
+                # Scale coordinates if we're using a preview
+                if need_resize:
+                    x_img = int(x_img * (preview_width / original_width))
+                    y_img = int(y_img * (preview_height / original_height))
+                
                 # Calculate size based on image dimensions
                 marker_size_ratio = 0.015  # 1.5% of the smaller dimension
                 circle_size = max(10, int(min(width, height) * marker_size_ratio))
@@ -533,6 +581,16 @@ def update_focal_plane_visualization(first_arg=0.5, second_arg=0.1, depth_map=No
                 
                 # Draw rectangles for each detected face - highlight selected face in magenta, others in grey
                 for idx, (face_x, face_y, face_w, face_h, _) in enumerate(last_detected_faces):
+                    # Scale coordinates if we're using a preview
+                    if need_resize:
+                        scaled_face_x = int(face_x * (preview_width / original_width))
+                        scaled_face_y = int(face_y * (preview_height / original_height))
+                        scaled_face_w = int(face_w * (preview_width / original_width))
+                        scaled_face_h = int(face_h * (preview_height / original_height))
+                    else:
+                        scaled_face_x, scaled_face_y = face_x, face_y
+                        scaled_face_w, scaled_face_h = face_w, face_h
+                    
                     # If this is the selected face or there's only one face, use magenta
                     if selected_face_idx == idx or selected_face_idx is None or len(last_detected_faces) == 1:
                         rect_color = (255, 0, 255)  # Magenta for selected/primary face
@@ -541,17 +599,16 @@ def update_focal_plane_visualization(first_arg=0.5, second_arg=0.1, depth_map=No
                     
                     # Draw a hollow rectangle with thick border around the whole face
                     cv2.rectangle(result, 
-                                 (face_x, face_y),
-                                 (face_x + face_w, face_y + face_h),
+                                 (scaled_face_x, scaled_face_y),
+                                 (scaled_face_x + scaled_face_w, scaled_face_y + scaled_face_h),
                                  rect_color, line_thickness * 2)  # Border twice as thick
-                
-                # Yellow diamond removed - no need to display the average focal point anymore
         
         # Convert to RGB for Gradio display
         result_rgb = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
         
         processing_time = time.time() - start_time
-        return result_rgb, f"Focal plane updated in {processing_time*1000:.1f} ms"
+        preview_status = " (preview: 720p)" if need_resize else ""
+        return result_rgb, f"Focal plane updated in {processing_time*1000:.1f} ms{preview_status}"
     
     except Exception as e:
         error_message = f"Error updating focal plane: {str(e)}"
@@ -870,6 +927,7 @@ def clear_stored_depth_map():
 def set_focal_distance_from_click(focal_distance, focal_thickness, evt: gr.SelectData):
     """Handler for depth map click events to set focal plane"""
     global last_clicked_point, last_detected_faces, last_face_center, selected_face_idx
+    global cached_depth_gray, cached_depth_height, cached_depth_width
     
     try:
         print(f"Function called with focal_distance={focal_distance}, focal_thickness={focal_thickness}")
@@ -883,17 +941,40 @@ def set_focal_distance_from_click(focal_distance, focal_thickness, evt: gr.Selec
         if not hasattr(evt, "index"):
             return focal_distance, None, "Invalid event data: no coordinates found."
             
-        # SelectData.index contains (x, y) pixel coordinates
+        # SelectData.index contains (x, y) pixel coordinates in preview space
         x_img, y_img = evt.index
-        print(f"Selected coordinates (pixels): x_img={x_img}, y_img={y_img}")
+        print(f"Selected coordinates (preview pixels): x_img={x_img}, y_img={y_img}")
         
         # Get depth map dimensions
-        height, width = cached_depth_gray.shape
-        print(f"Depth map dimensions: {width}x{height}")
+        original_height, original_width = cached_depth_gray.shape
+        print(f"Depth map dimensions (original): {original_width}x{original_height}")
             
+        # SCALING FIX: Check if the preview was downsampled
+        MAX_PREVIEW_DIMENSION = 720  # Must match value in update_focal_plane_visualization
+        need_rescale = max(original_height, original_width) > MAX_PREVIEW_DIMENSION
+        
+        # Calculate preview dimensions (must match logic in update_focal_plane_visualization)
+        preview_width, preview_height = original_width, original_height
+        if need_rescale:
+            if original_width >= original_height:
+                # Landscape orientation
+                preview_width = MAX_PREVIEW_DIMENSION
+                preview_height = int(original_height * (MAX_PREVIEW_DIMENSION / original_width))
+            else:
+                # Portrait orientation
+                preview_height = MAX_PREVIEW_DIMENSION
+                preview_width = int(original_width * (MAX_PREVIEW_DIMENSION / original_height))
+            
+            print(f"Preview dimensions: {preview_width}x{preview_height}")
+            
+            # Scale click coordinates from preview space to original resolution space
+            x_img = int(x_img * (original_width / preview_width))
+            y_img = int(y_img * (original_height / preview_height))
+            print(f"Scaled coordinates (original resolution): x_img={x_img}, y_img={y_img}")
+        
         # Ensure coordinates are within bounds
-        x_img = max(0, min(x_img, width-1))
-        y_img = max(0, min(y_img, height-1))
+        x_img = max(0, min(x_img, original_width-1))
+        y_img = max(0, min(y_img, original_height-1))
         
         # Get depth value at click point
         depth_val = cached_depth_gray[y_img, x_img]
@@ -907,7 +988,7 @@ def set_focal_distance_from_click(focal_distance, focal_thickness, evt: gr.Selec
         new_focal_distance = round(new_focal_distance * 20) / 20
         print(f"Rounded focal distance: {new_focal_distance}")
         
-        # Store the clicked point for persistence
+        # Store the clicked point for persistence (in original resolution space)
         last_clicked_point = (x_img, y_img)
         
         # Clear any previous face detection indicators
@@ -1003,9 +1084,12 @@ def face_track_focal_point(focal_distance, focal_thickness, face_detector_type="
         return focal_distance, None, "Please generate a depth map first."
     
     try:
+        # Get original dimensions
+        original_depth_height, original_depth_width = cached_depth_gray.shape
+        
         # Debug info
         print(f"Original image shape: {original_input_image.shape}")
-        print(f"Original image type: {original_input_image.dtype}")
+        print(f"Original depth map shape: {original_depth_width}x{original_depth_height}")
         print(f"Using face detector: {face_detector_type}")
         
         # Check if anime detector is needed but not initialized
@@ -1048,9 +1132,6 @@ def face_track_focal_point(focal_distance, focal_thickness, face_detector_type="
             detector_name = "anime face" if face_detector_type == "anime" else "face"
             return focal_distance, current_viz, f"No {detector_name}s detected in the image. Debug image saved to results/face_debug.jpg"
             
-        # Get the depth map dimensions
-        height, width = cached_depth_gray.shape
-        
         # Get the original image dimensions
         orig_h, orig_w = original_input_image.shape[:2]
         
@@ -1065,16 +1146,16 @@ def face_track_focal_point(focal_distance, focal_thickness, face_detector_type="
             face_center_y = y + h // 2
             
             # Scale coordinates to depth map dimensions
-            depth_x = int(face_center_x * width / orig_w)
-            depth_y = int(face_center_y * height / orig_h)
+            depth_x = int(face_center_x * original_depth_width / orig_w)
+            depth_y = int(face_center_y * original_depth_height / orig_h)
             
             # Scale face dimensions to depth map dimensions
-            depth_w = int(w * width / orig_w)
-            depth_h = int(h * height / orig_h)
+            depth_w = int(w * original_depth_width / orig_w)
+            depth_h = int(h * original_depth_height / orig_h)
             
             # Ensure coordinates are within bounds
-            depth_x = max(0, min(depth_x, width-1))
-            depth_y = max(0, min(depth_y, height-1))
+            depth_x = max(0, min(depth_x, original_depth_width-1))
+            depth_y = max(0, min(depth_y, original_depth_height-1))
             
             # Get depth value at face center point
             depth_val = cached_depth_gray[depth_y, depth_x]
