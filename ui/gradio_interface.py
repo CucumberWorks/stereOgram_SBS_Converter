@@ -137,18 +137,18 @@ except Exception as e:
     print(f"Error during auto-initialization of anime face detector: {e}")
 
 # Auto-initialize converter at module import time
-try:
-    print("Auto-initializing converter with default settings...")
-    converter_init_result = initialize_converter(
-        default_depth_model, 
-        default_model_size, 
-        default_use_advanced, 
-        default_max_res, 
-        default_low_memory
-    )
-    print(converter_init_result)
-except Exception as e:
-    print(f"Error during auto-initialization of converter: {e}")
+# try:
+#     print("Auto-initializing converter with default settings...")
+#     converter_init_result = initialize_converter(
+#         default_depth_model, 
+#         default_model_size, 
+#         default_use_advanced, 
+#         default_max_res, 
+#         default_low_memory
+#     )
+#     print(converter_init_result)
+# except Exception as e:
+#     print(f"Error during auto-initialization of converter: {e}")
 
 # Detect anime faces using the cascade classifier
 def detect_anime_faces(image):
@@ -249,6 +249,20 @@ def initialize_converter(depth_model_type, model_size, use_advanced_infill, max_
         message += "The tool will still attempt to function with limited capabilities."
         print(message)
         return message
+
+# Now that the initialize_converter function is defined, we can auto-initialize
+try:
+    print("Auto-initializing converter with default settings...")
+    converter_init_result = initialize_converter(
+        default_depth_model, 
+        default_model_size, 
+        default_use_advanced, 
+        default_max_res, 
+        default_low_memory
+    )
+    print(converter_init_result)
+except Exception as e:
+    print(f"Error during auto-initialization of converter: {e}")
 
 def generate_3d_image(left, right):
     """Generate red-cyan anaglyph image from left and right views"""
