@@ -586,22 +586,22 @@ async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_
     # Convert back to BGR for OpenCV
     result_bgr = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2BGR)
     
-    # Add a marker at the focal point for visualization
-    marker_size = max(10, min(w, h) // 50)  # Adaptive marker size
-    line_thickness = max(2, marker_size // 5)
+    # Remove all markers - no visual feedback
+    # marker_size = max(10, min(w, h) // 50)  # Adaptive marker size
+    # line_thickness = max(2, marker_size // 5)
     
     # Draw crosshair
-    cv2.line(result_bgr, 
-             (x_coord - marker_size, y_coord), 
-             (x_coord + marker_size, y_coord), 
-             (0, 255, 255), line_thickness)  # Horizontal yellow line
-    cv2.line(result_bgr, 
-             (x_coord, y_coord - marker_size), 
-             (x_coord, y_coord + marker_size), 
-             (0, 255, 255), line_thickness)  # Vertical yellow line
+    # cv2.line(result_bgr, 
+    #         (x_coord - marker_size, y_coord), 
+    #         (x_coord + marker_size, y_coord), 
+    #         (0, 255, 255), line_thickness)  # Horizontal yellow line
+    # cv2.line(result_bgr, 
+    #         (x_coord, y_coord - marker_size), 
+    #         (x_coord, y_coord + marker_size), 
+    #         (0, 255, 255), line_thickness)  # Vertical yellow line
     
     # Draw circle around crosshair
-    cv2.circle(result_bgr, (x_coord, y_coord), marker_size + 2, (0, 255, 255), line_thickness // 2)
+    # cv2.circle(result_bgr, (x_coord, y_coord), marker_size + 2, (0, 255, 255), line_thickness // 2)
     
     return result_bgr, depth_map
 
