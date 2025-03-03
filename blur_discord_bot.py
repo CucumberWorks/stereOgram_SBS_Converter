@@ -52,7 +52,7 @@ class BlurSession:
         self.sub_grid_image = None
         self.sub_grid_cells = {}
         self.focal_point = None
-        self.blur_strength = 3.5  # Default blur strength
+        self.blur_strength = 2.5  # Default blur strength
         self.max_blur_size = 31   # Default max blur size (kernel size)
         self.last_interaction = time.time()
         self.expiry_time = time.time() + 600  # 10 minutes expiry
@@ -103,7 +103,7 @@ async def initialize_converter():
         converter = StereogramSBS3DConverter(
             use_advanced_infill=False,
             depth_model_type="depth_anything_v2",
-            model_size="vits",  # Using smallest model for Discord bot
+            model_size="vitl",  # Using smallest model for Discord bot
             max_resolution=2048,  # Limit resolution to avoid memory issues
             low_memory_mode=True  # Use low memory processing
         )
@@ -539,7 +539,7 @@ async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_
         focal_depth = depth_map[y_coord, x_coord]
     
     # Parameters for depth-based blur
-    focal_thickness = 0.1
+    focal_thickness = 0.15
     blur_strength = blur_strength  # Higher values = stronger blur
     
     # Convert to RGB for processing
