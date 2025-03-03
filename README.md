@@ -98,17 +98,33 @@ run_stereogram_sbs3d_gui.bat
 
 ### Discord Bot
 
-1. Make sure you have set up your Discord bot token in the `.env` file
-2. Run the Discord bot using:
+1. Make sure you have set up your Discord bot token in the `.env` file:
+   ```
+   DISCORD_BOT_TOKEN=your_actual_token_here
+   ```
 
-```bash
-python stereogram_main.py --mode bot
-```
+2. Run the Discord bot:
 
-For Windows users, you can also use the included batch file:
-```bash
-run_discord_bot.bat
-```
+   **For Windows:**
+   ```bash
+   python stereogram_main.py --mode bot
+   ```
+   Or use the included batch file:
+   ```bash
+   run_discord_bot.bat
+   ```
+
+   **For macOS/Linux:**
+   ```bash
+   python3 stereogram_main.py --mode bot
+   ```
+   
+   **For macOS with SSL certificate issues:**
+   ```bash
+   SSL_CERT_FILE=$(python3 -c "import certifi; print(certifi.where())") python3 stereogram_main.py --mode bot
+   ```
+
+3. The bot will connect to Discord using your token and will be ready to process image conversion commands.
 
 For detailed Discord bot setup and usage, refer to the [Discord Bot Guide](docs/DISCORD_BOT_README.md).
 
