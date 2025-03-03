@@ -60,7 +60,7 @@ async def initialize_converter():
             depth_model_type="depth_anything_v2",
             model_size="vits",  # Using vits model as requested (smaller but faster)
             max_resolution=4096,  # Limit resolution to avoid Discord payload issues
-            low_memory_mode=True  # Use full quality processing
+            low_memory_mode=True  # Use low memory mode for Discord bot
         )
         # Configure high quality color processing with enhanced anti-banding
         converter.set_color_quality(
@@ -69,7 +69,7 @@ async def initialize_converter():
             dithering_level=1.5  # Stronger dithering to combat the banding issues
         )
         
-        # Set inpainting parameters matching Gradio's high quality defaults
+        # Set inpainting parameters matching high quality defaults
         converter.set_inpainting_params(
             steps=20,
             guidance_scale=7.5,
@@ -182,8 +182,6 @@ async def convert_to_sbs(ctx):
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Process image using the exact same pipeline as the Gradio interface
-        
         # Make sure we're working with BGR (OpenCV format)
         if img.shape[2] == 4:  # If RGBA, convert to BGR
             img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
@@ -215,10 +213,10 @@ async def convert_to_sbs(ctx):
             h, w = img.shape[:2]
             aspect_ratio = w / h
         
-        # Convert to float32 early for better precision (matching Gradio)
+        # Convert to float32 early for better precision
         img_float = img.astype(np.float32)
         
-        # Generate depth map (use original image for best results)
+        # Generate depth map
         depth_map = conv.estimate_depth(img)
         
         # Colorize depth map for visualization
@@ -234,11 +232,11 @@ async def convert_to_sbs(ctx):
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as depth_file:
             depth_path = depth_file.name
             
-        # Determine processing resolution (as in Gradio interface)
-        resolution = 1080  # Target height as in Gradio
+        # Determine processing resolution
+        resolution = 1080  # Target height
         high_quality = True  # Use high quality processing
         
-        # Calculate processing resolution based on Gradio's logic
+        # Calculate processing resolution
         if resolution == 720:
             process_res_factor = 480 if not high_quality else 600
         elif resolution == 1080:
@@ -267,52 +265,83 @@ async def convert_to_sbs(ctx):
         
         await processing_msg.edit(content="🔄 Generating stereo views from depth map...")
         
-        # Using the same stereo views generation logic as Gradio
-        shift_factor = 0.03  # Default from Gradio interface
-        left_view, right_view, left_holes, right_holes = conv.generate_stereo_views(
-            proc_img, depth_map_resized, shift_factor=shift_factor
-        )
+        # Using the stereo views generation logic
+        shift_factor = 0.03  # Default value
         
-        # Fill holes in the stereo views using exactly the same method as Gradio
+        # Check if the current method supports depth-based blur feature
+        if hasattr(conv, 'generate_stereo_views') and 'apply_depth_blur' in conv.generate_stereo_views.__code__.co_varnames:
+            # Use the method with depth blur capability
+            apply_depth_blur = False  # Default value, can be changed if needed
+            focal_distance = 0.5  # Default focal distance
+            focal_thickness = 0.1  # Default focal thickness
+            blur_strength = 1.0  # Default blur strength
+            max_blur_size = 21  # Default maximum blur size
+            
+            left_view, right_view, left_holes, right_holes = conv.generate_stereo_views(
+                proc_img, depth_map_resized, shift_factor=shift_factor,
+                apply_depth_blur=apply_depth_blur,
+                focal_distance=focal_distance,
+                focal_thickness=focal_thickness,
+                blur_strength=blur_strength,
+                max_blur_size=max_blur_size
+            )
+        else:
+            # Use the basic method without depth blur
+            left_view, right_view, left_holes, right_holes = conv.generate_stereo_views(
+                proc_img, depth_map_resized, shift_factor=shift_factor
+            )
+        
+        # Fill holes in the stereo views
         if conv.use_advanced_infill:
             await processing_msg.edit(content="🔄 Filling in missing areas with AI inpainting...")
             if np.sum(left_holes) > 0:
                 try:
-                    left_view = conv.fill_holes_preserving_originals(
-                        proc_img,  # Original image
-                        left_view, 
-                        left_holes,
-                        depth_map_resized,
-                        shift_factor=shift_factor,
-                        is_left_view=True
-                    )
+                    # Check if the advanced hole-filling method is available
+                    if hasattr(conv, 'fill_holes_preserving_originals'):
+                        left_view = conv.fill_holes_preserving_originals(
+                            proc_img,  # Original image
+                            left_view, 
+                            left_holes,
+                            depth_map_resized,
+                            shift_factor=shift_factor,
+                            is_left_view=True
+                        )
+                    else:
+                        left_view = conv.advanced_infill(left_view, left_holes, efficient_mode=True)
                 except Exception as e:
                     print(f"Error using preserving method for left view: {e}, falling back to advanced infill")
                     left_view = conv.advanced_infill(left_view, left_holes, efficient_mode=True)
             
             if np.sum(right_holes) > 0:
                 try:
-                    right_view = conv.fill_holes_preserving_originals(
-                        proc_img,  # Original image
-                        right_view, 
-                        right_holes,
-                        depth_map_resized,
-                        shift_factor=shift_factor,
-                        is_left_view=False
-                    )
+                    # Check if the advanced hole-filling method is available
+                    if hasattr(conv, 'fill_holes_preserving_originals'):
+                        right_view = conv.fill_holes_preserving_originals(
+                            proc_img,  # Original image
+                            right_view, 
+                            right_holes,
+                            depth_map_resized,
+                            shift_factor=shift_factor,
+                            is_left_view=False
+                        )
+                    else:
+                        right_view = conv.advanced_infill(right_view, right_holes, efficient_mode=True)
                 except Exception as e:
                     print(f"Error using preserving method for right view: {e}, falling back to advanced infill")
                     right_view = conv.advanced_infill(right_view, right_holes, efficient_mode=True)
         
-        # Apply the same enhanced anti-banding as in Gradio
+        # Apply anti-banding treatment
         await processing_msg.edit(content="🔄 Applying anti-banding treatment...")
         try:
             if hasattr(conv, '_enhanced_anti_banding') and conv.high_color_quality:
                 left_view = conv._enhanced_anti_banding(left_view)
                 right_view = conv._enhanced_anti_banding(right_view)
             else:
-                left_view = conv._enhance_image_quality(left_view)
-                right_view = conv._enhance_image_quality(right_view)
+                # Fallback to basic enhancement if enhanced anti-banding is not available
+                if hasattr(conv, '_enhance_image_quality'):
+                    left_view = conv._enhance_image_quality(left_view)
+                    right_view = conv._enhance_image_quality(right_view)
+                # If neither method is available, continue without enhancement
         except Exception as e:
             print(f"Error in anti-banding: {e}")
             # Continue without anti-banding if it fails
@@ -331,8 +360,7 @@ async def convert_to_sbs(ctx):
         left_view_resize = cv2.resize(left_view, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
         right_view_resize = cv2.resize(right_view, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
         
-        # Generate side-by-side 3D output - use target height for both sides
-        # Use the Gradio SBS generation logic
+        # Generate side-by-side 3D output
         h_left, w_left = left_view_resize.shape[:2]
         sbs_width = target_w * 2  # Full width of SBS image
         sbs_3d = np.hstack((left_view_resize, right_view_resize))
