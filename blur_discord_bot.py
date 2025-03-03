@@ -665,13 +665,17 @@ async def on_message(message):
                 file=grid_file
             )
             
-            # Return early - we've handled this message
+            # Don't return early - we still need to process commands
+            # Also skip any further active session checks for this message
+            await bot.process_commands(message)
             return
             
         except Exception as e:
             await processing_msg.edit(content=f"{message.author.mention} An error occurred: {str(e)}")
             import traceback
             traceback.print_exc()
+            # Process commands before returning
+            await bot.process_commands(message)
             return
     
     # Handle blur strength adjustment replies
@@ -918,14 +922,17 @@ async def on_message(message):
         # Invalid input
         elif (session.selection_stage == 1 and content not in session.grid_cells) or \
              (session.selection_stage == 2 and content not in ["1", "2", "3", "4", "5", "6", "7", "8", "9"]):
-            if session.selection_stage == 1:
-                await message.channel.send(
-                    f"{message.author.mention} Invalid cell selection. Please select a valid cell (e.g., A1, B2) from the grid."
-                )
-            else:
-                await message.channel.send(
-                    f"{message.author.mention} Invalid selection. Please choose a number from 1 to 9 for precise focus within cell {session.selected_cell}."
-                )
+            # Don't show invalid selection messages for messages with image attachments
+            # as these will be handled by the image upload code above
+            if not message.attachments:
+                if session.selection_stage == 1:
+                    await message.channel.send(
+                        f"{message.author.mention} Invalid cell selection. Please select a valid cell (e.g., A1, B2) from the grid."
+                    )
+                else:
+                    await message.channel.send(
+                        f"{message.author.mention} Invalid selection. Please choose a number from 1 to 9 for precise focus within cell {session.selected_cell}."
+                    )
     
     # Process commands
     await bot.process_commands(message)
