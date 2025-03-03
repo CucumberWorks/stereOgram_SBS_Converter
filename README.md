@@ -26,7 +26,7 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
 
 - Python 3.8+
 - CUDA-compatible GPU recommended (8GB+ VRAM)
-- Discord Bot Token
+- Discord Bot Token (if using the Discord bot)
 
 ## Installation
 
@@ -35,7 +35,6 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
    git clone https://github.com/CucumberWorks/stereOgram_SBS_Converter.git
    cd stereOgram_SBS_Converter
    ```
-
 
 2. Install the required dependencies:
    ```
@@ -50,7 +49,7 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
 
 4. Model weights:
    
-   > **Important Note:** Model weights are NOT included in this repository as they are too large for GitHub. They will be automatically downloaded the first time you run the bot.
+   > **Important Note:** Model weights are NOT included in this repository as they are too large for GitHub. They will be automatically downloaded the first time you run the application.
    
    The application will automatically download the required model weights when you first run it. However, if you're in an offline environment or prefer to download them manually, follow these steps:
    
@@ -92,13 +91,26 @@ Or simply:
 python stereogram_main.py
 ```
 
+For Windows users, you can also use the included batch file:
+```bash
+run_stereogram_sbs3d_gui.bat
+```
+
 ### Discord Bot
 
-Run the Discord bot using:
+1. Make sure you have set up your Discord bot token in the `.env` file
+2. Run the Discord bot using:
 
 ```bash
 python stereogram_main.py --mode bot
 ```
+
+For Windows users, you can also use the included batch file:
+```bash
+run_discord_bot.bat
+```
+
+For detailed Discord bot setup and usage, refer to the [Discord Bot Guide](docs/DISCORD_BOT_README.md).
 
 ### Command Line Interface
 
@@ -115,6 +127,15 @@ Run the test converter with sample images:
 ```bash
 python stereogram_main.py --mode test
 ```
+
+## Documentation
+
+The project includes comprehensive documentation:
+
+- [Application User Guide](docs/APP_GUIDE.md) - How to use the application interface
+- [Setup Guide](docs/SETUP_GUIDE.md) - Complete setup instructions
+- [Discord Bot Guide](docs/DISCORD_BOT_README.md) - How to set up and use the Discord bot
+- [Debugging Guide](docs/DEBUGGING_GUIDE.md) - Troubleshooting common issues
 
 ## Project Structure
 
@@ -145,13 +166,21 @@ stereOgram_SBS_Converter/
 
 ## Debugging
 
-If you encounter issues, you can run the diagnostic tool:
+If you encounter issues, you can run the debug mode:
 
 ```bash
 python stereogram_main.py --mode debug
 ```
 
-For more detailed information, refer to the [Debugging Guide](docs/DEBUGGING_GUIDE.md).
+This will run the diagnostic utilities in the debug directory, which can help identify common issues.
+
+For macOS users experiencing SSL certificate verification errors, try:
+
+```bash
+SSL_CERT_FILE=$(python -c "import certifi; print(certifi.where())") python stereogram_main.py --mode bot
+```
+
+For more detailed troubleshooting information, refer to the [Debugging Guide](docs/DEBUGGING_GUIDE.md).
 
 ## Configuration Options
 
