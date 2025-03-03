@@ -15,6 +15,7 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
 - **Wiggle GIF animation** for glasses-free 3D viewing
 - **Advanced hole filling** for parallax gaps using AI-based inpainting
 - **Discord bot integration** for easy conversion through Discord
+- **Specialized anime processing** with anime face detection ([learn more](docs/ANIME_FACE_TRACKING.md))
 - Preserves original pixels for highest quality results
 - Supports various resolutions and quality settings
 
@@ -25,7 +26,7 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
 ## Requirements
 
 - Python 3.8+
-- CUDA-compatible GPU recommended (8GB+ VRAM)
+- CUDA-compatible GPU or Apple Silicon Mac recommended (8GB+ VRAM)
 - Discord Bot Token (if using the Discord bot)
 
 ## Installation
@@ -40,6 +41,8 @@ A tool that converts regular 2D images into stereogram 3D formats (side-by-side)
    ```
    pip install -r requirements.txt
    ```
+   
+   > macOS users: For help setting up a Python virtual environment, see the [macOS Virtual Environment Guide](docs/MACOS_VENV_GUIDE.md).
 
 3. Create a `.env` file with your Discord Bot Token (if using Discord bot):
    ```
@@ -102,6 +105,8 @@ run_stereogram_sbs3d_gui.bat
    ```
    DISCORD_BOT_TOKEN=your_actual_token_here
    ```
+   
+   > Need help getting a Discord bot token? See the [Discord Token Guide](docs/DISCORD_TOKEN_GUIDE.md).
 
 2. Run the Discord bot:
 
@@ -151,6 +156,9 @@ The project includes comprehensive documentation:
 - [Application User Guide](docs/APP_GUIDE.md) - How to use the application interface
 - [Setup Guide](docs/SETUP_GUIDE.md) - Complete setup instructions
 - [Discord Bot Guide](docs/DISCORD_BOT_README.md) - How to set up and use the Discord bot
+- [Discord Token Guide](docs/DISCORD_TOKEN_GUIDE.md) - Step-by-step guide to obtain a Discord bot token
+- [macOS Virtual Environment Setup](docs/MACOS_VENV_GUIDE.md) - Guide for setting up a Python virtual environment on macOS
+- [Anime Face Tracking Reference](docs/ANIME_FACE_TRACKING.md) - Information about anime face tracking integration
 - [Debugging Guide](docs/DEBUGGING_GUIDE.md) - Troubleshooting common issues
 
 ## Project Structure
