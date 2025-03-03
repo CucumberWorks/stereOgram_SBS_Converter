@@ -56,11 +56,11 @@ async def initialize_converter():
     global converter
     if converter is None:
         converter = StereogramSBS3DConverter(
-            use_advanced_infill=True,
+            use_advanced_infill=False,
             depth_model_type="depth_anything_v2",
-            model_size="vits",  # Using vits model as requested (smaller but faster)
+            model_size="vitb",  # Using vits model as requested (smaller but faster)
             max_resolution=4096,  # Limit resolution to avoid Discord payload issues
-            low_memory_mode=True  # Use low memory mode for Discord bot
+            low_memory_mode=False  # Use low memory mode for Discord bot
         )
         # Configure high quality color processing with enhanced anti-banding
         converter.set_color_quality(
