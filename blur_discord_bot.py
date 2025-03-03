@@ -754,15 +754,20 @@ async def on_message(message):
                 focal_x = (x1 + x2) // 2
                 focal_y = (y1 + y2) // 2
                 
+                # Calculate normalized coordinates (0-1 range) for consistent handling
+                h, w = session.original_image.shape[:2]
+                norm_focal_x = focal_x / w
+                norm_focal_y = focal_y / h
+                
                 # Store the final focal point
                 focal_point = f"{session.selected_cell}-{content}"  # e.g., "A1-5"
-                session.focal_point = (focal_point, focal_x, focal_y)
+                session.focal_point = (focal_point, norm_focal_x, norm_focal_y)
                 
                 # Apply depth-based blur
                 blurred_image, depth_map = await apply_focal_blur(
                     session.original_image,
-                    focal_x,
-                    focal_y,
+                    norm_focal_x,
+                    norm_focal_y,
                     session.blur_strength,
                     session.max_blur_size
                 )
