@@ -133,6 +133,68 @@ run_stereogram_sbs3d_gui.bat
 
 For detailed Discord bot setup and usage, refer to the [Discord Bot Guide](docs/DISCORD_BOT_README.md).
 
+### Blur Discord Bot
+
+The project also includes a specialized Discord bot for applying depth-based blur effects to images with precise focal point selection.
+
+#### Features
+
+- **Interactive Focal Point Selection**: Uses a grid-based system for precise selection of focus areas
+- **Depth-Based Blur**: Applies blur based on the depth map, keeping selected areas in focus
+- **Adjustable Blur Strength**: Customize the blur effect by replying with "+" or "-" symbols
+- **Adjustable Blur Size**: Modify the maximum blur kernel size along with the strength
+- **Session Management**: Maintains user sessions for a seamless experience
+- **Direct Image Upload**: Easily start a new session by uploading an image
+
+#### Setup
+
+1. Make sure you have set up your Discord bot token in the `.env` file (same as the main Discord bot):
+   ```
+   DISCORD_BOT_TOKEN=your_actual_token_here
+   ```
+
+2. Run the Blur Discord bot:
+
+   **For Windows:**
+   ```bash
+   run_blur_discord_bot.bat
+   ```
+
+   **For macOS/Linux:**
+   ```bash
+   ./run_blur_discord_bot.sh
+   ```
+
+#### Usage
+
+1. **Start a session**: Upload an image to any channel where the bot has access
+2. **Select focal point**:
+   - The bot will respond with a grid overlaid on your image
+   - Reply with a letter (A-I) to select a grid section
+   - The bot will then show a refined grid with numbers (1-9)
+   - Reply with a number to select the exact focal point
+
+3. **Adjust blur effect**:
+   - After receiving the blurred image, reply with:
+     - `+` to increase blur strength (can stack, e.g., `+++` for larger increase)
+     - `-` to decrease blur strength (can stack, e.g., `---` for larger decrease)
+   - The bot will regenerate the image with the adjusted blur settings
+
+4. **Start a new session**: Simply upload a new image at any time
+
+#### Example Commands
+
+- `+` - Slightly increase blur strength
+- `+++` - Significantly increase blur strength
+- `-` - Slightly decrease blur strength
+- `--` - Moderately decrease blur strength
+
+#### Troubleshooting
+
+- If the bot doesn't respond to uploads, ensure it has proper permissions in the Discord channel
+- For very large images, the bot may take longer to process or might fail due to Discord file size limitations
+- If you encounter "Invalid selection" messages, try uploading the image again to start a fresh session
+
 ### Command Line Interface
 
 Process a single image using:
