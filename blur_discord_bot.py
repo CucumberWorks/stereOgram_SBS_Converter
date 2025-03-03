@@ -603,10 +603,6 @@ async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_
     # Draw circle around crosshair
     cv2.circle(result_bgr, (x_coord, y_coord), marker_size + 2, (0, 255, 255), line_thickness // 2)
     
-    # If region was used, also draw the region outline
-    if region is not None:
-        cv2.rectangle(result_bgr, (x1, y1), (x2, y2), (0, 255, 255), max(1, line_thickness // 2))
-    
     return result_bgr, depth_map
 
 @bot.event
@@ -708,7 +704,7 @@ async def on_message(message):
                                     # Send the updated blurred image
                                     focal_point_str = session.focal_point[0]
                                     result_message = await message.channel.send(
-                                        f"{message.author.mention} Here's your image with **blur strength {session.blur_strength:.1f}** and **size {session.max_blur_size}** focused at {focal_point_str} (marked with a yellow crosshair):\n"
+                                        f"{message.author.mention} Here's your image with **blur strength {session.blur_strength:.1f}** and **size {session.max_blur_size}** focused at {focal_point_str}:\n"
                                         f"*Reply with multiple + or - symbols to adjust blur effect (e.g., +, ++, +++, -, --, ---, etc.)*",
                                         file=discord.File(fp=image_binary, filename=f"blurred_{focal_point_str}_s{session.blur_strength:.1f}_k{session.max_blur_size}.png")
                                     )
@@ -836,7 +832,7 @@ async def on_message(message):
                     # Send the blurred image
                     await processing_msg.delete()
                     result_message = await message.channel.send(
-                        f"{message.author.mention} Here's your image with **blur strength {session.blur_strength:.1f}** and **size {session.max_blur_size}** focused at {focal_point} (marked with a yellow crosshair):\n"
+                        f"{message.author.mention} Here's your image with **blur strength {session.blur_strength:.1f}** and **size {session.max_blur_size}** focused at {focal_point}:\n"
                         f"*Reply with multiple + or - symbols to adjust blur effect (e.g., +, ++, +++, -, --, ---, etc.)*",
                         file=discord.File(fp=image_binary, filename=f"blurred_{focal_point}_s{session.blur_strength:.1f}_k{session.max_blur_size}.png")
                     )
