@@ -39,21 +39,26 @@ converter = None
 user_sessions = {}
 
 class BlurSession:
-    def __init__(self, user_id, channel_id, message_id, original_image, grid_image, grid_cells):
+    """Class to manage user session state for blur operations."""
+    
+    def __init__(self, user_id, original_image):
+        """Initialize a blur session for a user."""
         self.user_id = user_id
-        self.channel_id = channel_id
-        self.original_message_id = message_id
         self.original_image = original_image
-        self.grid_image = grid_image
-        self.grid_cells = grid_cells
-        self.depth_map = None
+        self.grid_image = None
+        self.grid_cells = {}
+        self.checkerboard_image = None
+        self.selected_cell = None
+        self.sub_grid_image = None
+        self.sub_grid_cells = {}
         self.focal_point = None
-        self.selected_cell = None  # Store the first-level grid cell selection (e.g., "A1")
-        self.sub_grid_image = None  # Store the image with the 3x3 sub-grid
-        self.sub_grid_cells = None  # Store the 3x3 sub-grid cell positions
-        self.selection_stage = 1   # 1: Main grid selection, 2: Sub-grid selection
-        self.expiry_time = time.time() + 600  # Session expires after 10 minutes
+        self.blur_strength = 3.5  # Default blur strength
+        self.max_blur_size = 31   # Default max blur size (kernel size)
         self.last_interaction = time.time()
+        self.expiry_time = time.time() + 600  # 10 minutes expiry
+        self.selection_message_id = None
+        self.result_message_id = None
+        self.selection_stage = 1   # 1: Main grid selection, 2: Sub-grid selection
 
 # Function to periodically clean up expired sessions
 async def clean_expired_sessions():
@@ -68,7 +73,7 @@ async def clean_expired_sessions():
         
         for user_id in expired_users:
             print(f"Session expired for user ID {user_id}")
-            del user_sessions[user_id]
+            end_user_session(user_id)
         
         await asyncio.sleep(60)  # Check every minute
 
@@ -387,11 +392,23 @@ def clear_converter():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+def end_user_session(user_id):
+    """End a user's session cleanly."""
+    if user_id in user_sessions:
+        # Clean up any large data
+        session = user_sessions[user_id]
+        session.original_image = None
+        session.grid_image = None
+        session.checkerboard_image = None
+        session.sub_grid_image = None
+        # Remove from sessions dictionary
+        del user_sessions[user_id]
+
 @bot.command(name=COMMAND_NAME)
 async def blur_command(ctx):
     """Command to apply out-of-focus blur to an image."""
     # Check if the user already has an active session
-    if ctx.author.id in user_sessions:
+    if ctx.author.id in user_sessions and not ctx.message.attachments:
         session = user_sessions[ctx.author.id]
         # Update the session expiry
         session.last_interaction = time.time()
@@ -413,6 +430,11 @@ async def blur_command(ctx):
     if not attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')):
         await ctx.send(f"{ctx.author.mention} Please attach a valid image file (PNG, JPG, JPEG, WEBP, BMP)!")
         return
+    
+    # If user has an existing session, replace it with a new one
+    if ctx.author.id in user_sessions:
+        await ctx.send(f"{ctx.author.mention} Starting a new blur session with your uploaded image...")
+        end_user_session(ctx.author.id)
     
     # Send initial processing message
     processing_msg = await ctx.send(f"{ctx.author.mention} Processing your image... ⏳")
@@ -439,12 +461,11 @@ async def blur_command(ctx):
         # Create a new session for the user
         user_sessions[ctx.author.id] = BlurSession(
             ctx.author.id,
-            ctx.channel.id,
-            ctx.message.id,
-            image.copy(),
-            grid_image,
-            grid_cells
+            image.copy()
         )
+        session = user_sessions[ctx.author.id]
+        session.grid_image = grid_image
+        session.grid_cells = grid_cells
         
         # Create a more visible grid
         grid_file = discord.File(grid_bytes, filename='grid.png')
@@ -465,73 +486,206 @@ async def blur_command(ctx):
         import traceback
         traceback.print_exc()
 
-async def apply_focal_blur(image, focal_x, focal_y):
+async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_size=31):
     """
-    Apply depth-based blur using the focal point coordinates.
+    Apply depth-based blur to an image using a specified focal point.
     
     Args:
-        image: Original image (NumPy array)
-        focal_x: X-coordinate of the focal point
-        focal_y: Y-coordinate of the focal point
+        image: The input image
+        focal_x: X-coordinate of focal point (normalized 0-1)
+        focal_y: Y-coordinate of focal point (normalized 0-1)
+        blur_strength: Strength of blur effect (default: 3.5)
+        max_blur_size: Maximum blur kernel size (default: 31)
         
     Returns:
-        Blurred image with the focal point in focus
+        Tuple of (blurred image, depth map)
     """
+    # Initialize converter if it's not already initialized
     global converter
-    
-    # Initialize converter if not already initialized
     if converter is None:
         await initialize_converter()
     
-    # Generate depth map using the correct method name
+    # Generate depth map
     depth_map = converter.estimate_depth(image)
     
-    # Normalize coordinates to 0-1 range for the focal distance
-    height, width = image.shape[:2]
-    norm_x = focal_x / width
-    norm_y = focal_y / height
+    # Normalize coordinates to image dimensions
+    h, w = image.shape[:2]
+    y_coord = int(focal_y * h)
+    x_coord = int(focal_x * w)
     
-    # Sample the depth value at the focal point
-    focal_depth = depth_map[focal_y, focal_x]
+    # Limit coordinates to valid range
+    y_coord = max(0, min(y_coord, h - 1))
+    x_coord = max(0, min(x_coord, w - 1))
     
-    # Calibrate focal distance based on the depth value at the focal point
-    focal_distance = float(focal_depth)
+    # Sample depth at focal point
+    focal_depth = depth_map[y_coord, x_coord]
     
-    # Set appropriate thickness for the focal plane
-    focal_thickness = 0.15  # This determines how much area around the focal point stays sharp
-    
-    # Adjust blur parameters
-    blur_strength = 2.0     # Stronger blur effect
-    max_blur_size = 25      # Maximum blur kernel size
+    # Parameters for depth-based blur
+    focal_thickness = 0.1
+    blur_strength = blur_strength  # Higher values = stronger blur
     
     # Convert to RGB for processing
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     
-    # Apply blur directly to the image
-    # Convert to float for processing
-    image_float = image.astype(np.float32) / 255.0
+    # Process as float
+    rgb_float = rgb_image.astype(np.float32) / 255.0
     
     # Apply depth-based blur
-    blurred_float = converter._apply_depth_blur_to_view(
-        image_float, 
-        depth_map, 
-        focal_distance, 
-        focal_thickness, 
-        blur_strength, 
-        max_blur_size
-    )
+    blurred = np.zeros_like(rgb_float)
+    
+    # Create depth mask (0 = in focus, 1 = out of focus)
+    depth_diff = np.abs(depth_map - focal_depth)
+    focus_mask = np.clip(depth_diff / focal_thickness, 0, 1)
+    
+    # Apply variable blur based on focus_mask
+    for i in range(3):  # RGB channels
+        channel = rgb_float[:,:,i]
+        blurred_channel = channel.copy()
+        
+        # Apply blur with sizes based on out-of-focus amount
+        for blur_size in range(3, max_blur_size + 1, 2):  # Odd numbers from 3 to max_blur_size
+            # Scale the blur strength
+            blur_weight = (blur_size - 1) / (max_blur_size - 1)
+            
+            # Areas that need this level of blur
+            level_mask = (focus_mask >= blur_weight * 0.8) & (focus_mask <= blur_weight * 1.2)
+            
+            if np.any(level_mask):
+                # Apply blur at this level
+                temp_blurred = cv2.GaussianBlur(channel, (blur_size, blur_size), 0)
+                blurred_channel[level_mask] = temp_blurred[level_mask]
+        
+        blurred[:,:,i] = blurred_channel
+    
+    # Linear interpolation between original and blurred based on focus_mask * blur_strength
+    blend_weights = np.clip(focus_mask * blur_strength, 0, 1)
+    blend_weights = blend_weights[:,:,np.newaxis]  # Add channel dimension
+    result = (1 - blend_weights) * rgb_float + blend_weights * blurred
     
     # Convert back to uint8
-    blurred_image = (blurred_float * 255).astype(np.uint8)
+    result_uint8 = (result * 255).astype(np.uint8)
     
-    return blurred_image
+    # Convert back to BGR for OpenCV
+    result_bgr = cv2.cvtColor(result_uint8, cv2.COLOR_RGB2BGR)
+    
+    return result_bgr, depth_map
 
 @bot.event
 async def on_message(message):
-    """Handle messages for selecting grid cells and sub-grid numbers."""
+    """Handle messages for selecting grid cells, sub-grid numbers, and blur adjustments."""
     # Skip messages from the bot itself
     if message.author == bot.user:
         return
+    
+    # Handle blur strength adjustment replies
+    if message.reference and message.reference.message_id:
+        # Check if the message is a reply to a bot message
+        try:
+            # Get the referenced message
+            referenced_message = await message.channel.fetch_message(message.reference.message_id)
+            
+            # Only process if it's a reply to one of our bot's messages
+            if referenced_message.author == bot.user:
+                content = message.content.strip().lower()
+                
+                # Check if user has an active session
+                if message.author.id in user_sessions:
+                    session = user_sessions[message.author.id]
+                    
+                    # Check if this is a reply to the result message
+                    if session.result_message_id == referenced_message.id:
+                        processing_msg = None
+                        
+                        # Handle blur strength/size adjustment with flexible input
+                        if "+" in content or "-" in content:
+                            # Count the number of + and - symbols
+                            plus_count = content.count("+")
+                            minus_count = content.count("-")
+                            
+                            # Determine adjustment amount based on symbol count
+                            strength_adjustment = 0
+                            size_adjustment = 0
+                            
+                            if plus_count > 0 and minus_count == 0:
+                                # Increasing blur - adjust both strength and size
+                                if plus_count <= 3:
+                                    strength_adjustment = plus_count * 0.5  # 0.5 per +
+                                    size_adjustment = plus_count * 2        # 2 per +
+                                else:
+                                    strength_adjustment = 1.5 + (plus_count - 3) * 0.25  # Diminishing returns past +++
+                                    size_adjustment = 6 + (plus_count - 3) * 1            # Diminishing returns past +++
+                            elif minus_count > 0 and plus_count == 0:
+                                # Decreasing blur - adjust both strength and size
+                                if minus_count <= 3:
+                                    strength_adjustment = minus_count * -0.5  # -0.5 per -
+                                    size_adjustment = minus_count * -2        # -2 per -
+                                else:
+                                    strength_adjustment = -1.5 + (minus_count - 3) * -0.25  # Diminishing returns past ---
+                                    size_adjustment = -6 + (minus_count - 3) * -1           # Diminishing returns past ---
+                            
+                            # Send processing message
+                            adjustment_sign = "+" if strength_adjustment > 0 else ""
+                            processing_msg = await message.channel.send(
+                                f"{message.author.mention} Adjusting blur ({adjustment_sign}{strength_adjustment:.1f})... ⏳"
+                            )
+                            
+                            # Update blur parameters (ensure they stay in reasonable ranges)
+                            session.blur_strength = max(0.5, min(10.0, session.blur_strength + strength_adjustment))
+                            session.max_blur_size = max(11, min(63, int(session.max_blur_size + size_adjustment)))
+                            # Ensure max_blur_size is odd
+                            if session.max_blur_size % 2 == 0:
+                                session.max_blur_size += 1
+                            
+                            try:
+                                # Get the focal point coordinates
+                                _, focal_x, focal_y = session.focal_point
+                                
+                                # Apply updated depth-based blur
+                                blurred_image, _ = await apply_focal_blur(
+                                    session.original_image,
+                                    focal_x,
+                                    focal_y,
+                                    session.blur_strength,
+                                    session.max_blur_size
+                                )
+                                
+                                # Convert the blurred image to bytes for sending
+                                blurred_pil = Image.fromarray(cv2.cvtColor(blurred_image, cv2.COLOR_BGR2RGB))
+                                with BytesIO() as image_binary:
+                                    blurred_pil.save(image_binary, 'PNG')
+                                    image_binary.seek(0)
+                                    
+                                    # Delete processing message
+                                    if processing_msg:
+                                        await processing_msg.delete()
+                                    
+                                    # Send the updated blurred image
+                                    focal_point_str = session.focal_point[0]
+                                    result_message = await message.channel.send(
+                                        f"{message.author.mention} Here's your image with **blur strength {session.blur_strength:.1f}** and **size {session.max_blur_size}** focused at {focal_point_str}:\n"
+                                        f"*Reply with multiple + or - symbols to adjust blur effect (e.g., +, ++, +++, -, --, ---, etc.)*",
+                                        file=discord.File(fp=image_binary, filename=f"blurred_{focal_point_str}_s{session.blur_strength:.1f}_k{session.max_blur_size}.png")
+                                    )
+                                    
+                                    # Update the result message ID
+                                    session.result_message_id = result_message.id
+                                    
+                                    # Update session expiry time
+                                    session.last_interaction = time.time()
+                                    session.expiry_time = time.time() + 600
+                            except Exception as e:
+                                if processing_msg:
+                                    await processing_msg.delete()
+                                await message.channel.send(
+                                    f"{message.author.mention} An error occurred while adjusting blur: {str(e)}"
+                                )
+                                import traceback
+                                traceback.print_exc()
+                        
+                        return  # Skip further processing
+        except (discord.NotFound, discord.HTTPException):
+            # Message not found or other Discord API error, continue with normal processing
+            pass
     
     # Check if the user has an active session
     if message.author.id in user_sessions:
@@ -584,6 +738,9 @@ async def on_message(message):
                 import traceback
                 traceback.print_exc()
                 
+                # If an error occurred, clean up the session
+                end_user_session(message.author.id)
+                
         # Step 2: Sub-grid selection
         elif session.selection_stage == 2 and content in ["1", "2", "3", "4", "5", "6", "7", "8", "9"]:
             processing_msg = await message.channel.send(
@@ -602,10 +759,12 @@ async def on_message(message):
                 session.focal_point = (focal_point, focal_x, focal_y)
                 
                 # Apply depth-based blur
-                blurred_image = await apply_focal_blur(
+                blurred_image, depth_map = await apply_focal_blur(
                     session.original_image,
                     focal_x,
-                    focal_y
+                    focal_y,
+                    session.blur_strength,
+                    session.max_blur_size
                 )
                 
                 # Convert the blurred image to bytes for sending
@@ -616,13 +775,17 @@ async def on_message(message):
                     
                     # Send the blurred image
                     await processing_msg.delete()
-                    await message.channel.send(
-                        f"{message.author.mention} Here's your image with depth-based blur focused at {focal_point}:",
-                        file=discord.File(fp=image_binary, filename=f"blurred_{focal_point}.png")
+                    result_message = await message.channel.send(
+                        f"{message.author.mention} Here's your image with **blur strength {session.blur_strength:.1f}** and **size {session.max_blur_size}** focused at {focal_point}:\n"
+                        f"*Reply with multiple + or - symbols to adjust blur effect (e.g., +, ++, +++, -, --, ---, etc.)*",
+                        file=discord.File(fp=image_binary, filename=f"blurred_{focal_point}_s{session.blur_strength:.1f}_k{session.max_blur_size}.png")
                     )
-                
-                # Reset session for potential new requests
-                del user_sessions[message.author.id]
+                    
+                    # Store the result message ID for later reference
+                    session.result_message_id = result_message.id
+                    
+                    # Keep the session active for further blur adjustments
+                    # Don't delete the session to allow for blur strength adjustments
                 
             except Exception as e:
                 await message.channel.send(
@@ -630,6 +793,9 @@ async def on_message(message):
                 )
                 import traceback
                 traceback.print_exc()
+                
+                # If an error occurred, clean up the session
+                end_user_session(message.author.id)
         
         # Invalid input
         elif (session.selection_stage == 1 and content not in session.grid_cells) or \
