@@ -486,7 +486,7 @@ async def blur_command(ctx):
         import traceback
         traceback.print_exc()
 
-async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_size=31):
+async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_size=31, region=None):
     """
     Apply depth-based blur to an image using a specified focal point.
     
@@ -496,6 +496,7 @@ async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_
         focal_y: Y-coordinate of focal point (normalized 0-1)
         blur_strength: Strength of blur effect (default: 3.5)
         max_blur_size: Maximum blur kernel size (default: 31)
+        region: Region of interest for region-based depth sampling
         
     Returns:
         Tuple of (blurred image, depth map)
@@ -517,8 +518,25 @@ async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_
     y_coord = max(0, min(y_coord, h - 1))
     x_coord = max(0, min(x_coord, w - 1))
     
-    # Sample depth at focal point
-    focal_depth = depth_map[y_coord, x_coord]
+    # Sample depth at focal point or region
+    if region is not None:
+        # Extract region coordinates
+        x1 = max(0, int(region['x1'] * w))
+        y1 = max(0, int(region['y1'] * h))
+        x2 = min(w-1, int(region['x2'] * w))
+        y2 = min(h-1, int(region['y2'] * h))
+        
+        # Extract the depth values in the region
+        region_depths = depth_map[y1:y2, x1:x2]
+        
+        # Use median depth in the region as focal depth (more robust than average)
+        focal_depth = np.median(region_depths)
+        
+        # Don't modify the original image
+        # cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 255), 1)
+    else:
+        # Use single point if no region provided
+        focal_depth = depth_map[y_coord, x_coord]
     
     # Parameters for depth-based blur
     focal_thickness = 0.1
@@ -584,6 +602,10 @@ async def apply_focal_blur(image, focal_x, focal_y, blur_strength=3.5, max_blur_
     
     # Draw circle around crosshair
     cv2.circle(result_bgr, (x_coord, y_coord), marker_size + 2, (0, 255, 255), line_thickness // 2)
+    
+    # If region was used, also draw the region outline
+    if region is not None:
+        cv2.rectangle(result_bgr, (x1, y1), (x2, y2), (0, 255, 255), max(1, line_thickness // 2))
     
     return result_bgr, depth_map
 
@@ -655,7 +677,13 @@ async def on_message(message):
                             
                             try:
                                 # Get the focal point coordinates
-                                _, focal_x, focal_y = session.focal_point
+                                # The new format is (focal_point_str, focal_x, focal_y, region)
+                                # Handle both old and new format for backward compatibility
+                                if len(session.focal_point) >= 4:
+                                    _, focal_x, focal_y, region = session.focal_point
+                                else:
+                                    _, focal_x, focal_y = session.focal_point
+                                    region = None
                                 
                                 # Apply updated depth-based blur
                                 blurred_image, _ = await apply_focal_blur(
@@ -663,7 +691,8 @@ async def on_message(message):
                                     focal_x,
                                     focal_y,
                                     session.blur_strength,
-                                    session.max_blur_size
+                                    session.max_blur_size,
+                                    region
                                 )
                                 
                                 # Convert the blurred image to bytes for sending
@@ -776,9 +805,17 @@ async def on_message(message):
                 norm_focal_x = focal_x / w
                 norm_focal_y = focal_y / h
                 
+                # Also store the sub-cell region for region-based depth sampling
+                norm_region = {
+                    'x1': x1 / w,
+                    'y1': y1 / h,
+                    'x2': x2 / w,
+                    'y2': y2 / h
+                }
+                
                 # Store the final focal point
                 focal_point = f"{session.selected_cell}-{content}"  # e.g., "A1-5"
-                session.focal_point = (focal_point, norm_focal_x, norm_focal_y)
+                session.focal_point = (focal_point, norm_focal_x, norm_focal_y, norm_region)
                 
                 # Apply depth-based blur
                 blurred_image, depth_map = await apply_focal_blur(
@@ -786,7 +823,8 @@ async def on_message(message):
                     norm_focal_x,
                     norm_focal_y,
                     session.blur_strength,
-                    session.max_blur_size
+                    session.max_blur_size,
+                    norm_region
                 )
                 
                 # Convert the blurred image to bytes for sending
