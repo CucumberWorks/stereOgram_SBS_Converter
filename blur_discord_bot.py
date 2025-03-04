@@ -652,19 +652,19 @@ async def on_message(message):
                             if plus_count > 0 and minus_count == 0:
                                 # Increasing blur - adjust both strength and size
                                 if plus_count <= 3:
-                                    strength_adjustment = plus_count * 0.5  # 0.5 per +
-                                    size_adjustment = plus_count * 2        # 2 per +
+                                    strength_adjustment = plus_count * 1.0  # 1.0 per + (doubled from 0.5)
+                                    size_adjustment = plus_count * 4        # 4 per + (doubled from 2)
                                 else:
-                                    strength_adjustment = 1.5 + (plus_count - 3) * 0.25  # Diminishing returns past +++
-                                    size_adjustment = 6 + (plus_count - 3) * 1            # Diminishing returns past +++
+                                    strength_adjustment = 3.0 + (plus_count - 3) * 0.5  # Diminishing returns past +++ (doubled)
+                                    size_adjustment = 12 + (plus_count - 3) * 2         # Diminishing returns past +++ (doubled)
                             elif minus_count > 0 and plus_count == 0:
                                 # Decreasing blur - adjust both strength and size
                                 if minus_count <= 3:
-                                    strength_adjustment = minus_count * -0.5  # -0.5 per -
-                                    size_adjustment = minus_count * -2        # -2 per -
+                                    strength_adjustment = minus_count * -1.0  # -1.0 per - (doubled from -0.5)
+                                    size_adjustment = minus_count * -4        # -4 per - (doubled from -2)
                                 else:
-                                    strength_adjustment = -1.5 + (minus_count - 3) * -0.25  # Diminishing returns past ---
-                                    size_adjustment = -6 + (minus_count - 3) * -1           # Diminishing returns past ---
+                                    strength_adjustment = -3.0 + (minus_count - 3) * -0.5  # Diminishing returns past --- (doubled)
+                                    size_adjustment = -12 + (minus_count - 3) * -2         # Diminishing returns past --- (doubled)
                             
                             # Send processing message
                             adjustment_sign = "+" if strength_adjustment > 0 else ""
