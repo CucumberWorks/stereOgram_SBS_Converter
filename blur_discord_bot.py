@@ -612,71 +612,13 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
-    # Check if this is a message with an image attachment (to start a new session without command)
-    if message.attachments and any(attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp')) for attachment in message.attachments):
-        # Always create a processing message first
-        processing_msg = await message.channel.send(f"{message.author.mention} Starting a new blur session with your uploaded image...")
-        
-        # If user has an existing session, replace it 
-        if message.author.id in user_sessions:
-            end_user_session(message.author.id)
-        
-        # Process the image and create a new session
-        try:
-            # Download the image
-            attachment = message.attachments[0]
-            image_data = await download_image(attachment.url)
-            if not image_data:
-                await processing_msg.edit(content=f"{message.author.mention} Failed to download the image. Please try again!")
-                return
-            
-            # Convert to numpy array
-            np_image = np.asarray(bytearray(image_data), dtype=np.uint8)
-            image = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
-            
-            # Create the checkerboard grid
-            grid_image, grid_cells = create_checkerboard_grid(image, max_blocks=6)
-            
-            # Save the grid image to a BytesIO object
-            grid_bytes = io.BytesIO()
-            grid_image.save(grid_bytes, format='PNG')
-            grid_bytes.seek(0)
-            
-            # Create a new session for the user
-            user_sessions[message.author.id] = BlurSession(
-                message.author.id,
-                image.copy()
-            )
-            session = user_sessions[message.author.id]
-            session.grid_image = grid_image
-            session.grid_cells = grid_cells
-            
-            # Create a more visible grid
-            grid_file = discord.File(grid_bytes, filename='grid.png')
-            await processing_msg.delete()
-            
-            # Send instruction message with the grid image
-            await message.channel.send(
-                f"{message.author.mention} Here's your image with a grid overlay.\n"
-                f"**Instructions:**\n"
-                f"1. Look at the grid and decide which area you want to keep in focus\n"
-                f"2. Reply with a grid cell code (like **A1** or **B2**) to set that area as the focal point\n"
-                f"3. Your selection will expire in 10 minutes if not used",
-                file=grid_file
-            )
-            
-            # Don't return early - we still need to process commands
-            # Also skip any further active session checks for this message
-            await bot.process_commands(message)
-            return
-            
-        except Exception as e:
-            await processing_msg.edit(content=f"{message.author.mention} An error occurred: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            # Process commands before returning
-            await bot.process_commands(message)
-            return
+    # Check if this is a command - if so, let the command handler process it
+    if message.content.startswith(BOT_PREFIX):
+        await bot.process_commands(message)
+        return
+    
+    # REMOVED: No longer handling image attachments here to start sessions automatically
+    # Now only processing images when they come with the !blur command
     
     # Handle blur strength adjustment replies
     if message.reference and message.reference.message_id:
