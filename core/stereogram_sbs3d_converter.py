@@ -496,7 +496,9 @@ class StereogramSBS3DConverter:
         return depth_normalized
     
     def generate_stereo_views(self, image, depth_map, shift_factor=0.05, apply_depth_blur=False, 
-                             focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21):
+                             focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21,
+                             aperture_shape='circle', highlight_boost=1.5, enable_dithering=True, chromatic_aberration=2.0,
+                             edge_smoothness=2.0):
         """Generate left and right views based on depth map
         
         This enhanced version applies depth-based blur using parallax-shifted depth maps.
@@ -510,6 +512,11 @@ class StereogramSBS3DConverter:
             focal_thickness: Thickness of the in-focus region (0-1)
             blur_strength: Strength of the blur effect (multiplier)
             max_blur_size: Maximum kernel size for blur
+            aperture_shape: Shape of the bokeh ('circle', 'hexagon', 'octagon')
+            highlight_boost: How much to boost bright areas (1.0 = no boost)
+            enable_dithering: Whether to apply dithering to prevent banding
+            chromatic_aberration: Amount of color channel separation (0.0 = none)
+            edge_smoothness: Controls the smoothness of transitions at depth boundaries (0.5-2.0)
         """
         height, width = depth_map.shape[:2]
         
@@ -604,7 +611,12 @@ class StereogramSBS3DConverter:
             focal_distance, 
             focal_thickness, 
             blur_strength, 
-            max_blur_size
+            max_blur_size,
+            aperture_shape,
+            highlight_boost,
+            enable_dithering,
+            chromatic_aberration,
+            edge_smoothness
         )
         
         # Process right view with depth blur using its parallax-shifted depth map
@@ -614,7 +626,12 @@ class StereogramSBS3DConverter:
             focal_distance, 
             focal_thickness, 
             blur_strength, 
-            max_blur_size
+            max_blur_size,
+            aperture_shape,
+            highlight_boost,
+            enable_dithering,
+            chromatic_aberration,
+            edge_smoothness
         )
         
         # Convert back to uint8
@@ -652,7 +669,9 @@ class StereogramSBS3DConverter:
         
         return filled_view, filled_depth
     
-    def _apply_depth_blur_to_view(self, image, depth_map, focal_distance, focal_thickness, blur_strength, max_blur_size):
+    def _apply_depth_blur_to_view(self, image, depth_map, focal_distance, focal_thickness, blur_strength, max_blur_size,
+                                   aperture_shape='circle', highlight_boost=1.5, enable_dithering=True, chromatic_aberration=0.0,
+                                   edge_smoothness=1.0):
         """Apply depth-based blur to a view using its parallax-shifted depth map
         
         Args:
@@ -662,12 +681,52 @@ class StereogramSBS3DConverter:
             focal_thickness: Thickness of the in-focus region (0-1)
             blur_strength: Strength of the blur effect (multiplier)
             max_blur_size: Maximum kernel size for blur
+            aperture_shape: Shape of the bokeh ('circle', 'hexagon', 'octagon')
+            highlight_boost: How much to boost bright areas (1.0 = no boost)
+            enable_dithering: Whether to apply dithering to prevent banding
+            chromatic_aberration: Amount of color channel separation (0.0 = none)
+            edge_smoothness: Controls the smoothness of transitions at depth boundaries (0.5-2.0)
             
         Returns:
             Blurred image in linear light space (0-1 range)
         """
         height, width = depth_map.shape[:2]
         result = np.zeros_like(image)
+        
+        # Detect edges in the depth map for special treatment
+        depth_edges = cv2.Canny(
+            (depth_map * 255).astype(np.uint8), 
+            threshold1=10, 
+            threshold2=50
+        )
+        
+        # Create a mask around depth edges
+        edge_mask = cv2.dilate(
+            depth_edges, 
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), 
+            iterations=int(edge_smoothness * 2)
+        ).astype(bool)
+        
+        # Apply bilateral filtering to the depth map for smoother transitions while preserving edges
+        depth_map_smooth = cv2.bilateralFilter(
+            depth_map, 
+            d=int(9 * edge_smoothness),
+            sigmaColor=0.1,
+            sigmaSpace=int(7 * edge_smoothness)
+        )
+        
+        # Apply additional smoothing at the edges
+        if edge_smoothness > 0.5:
+            edge_smoothed = cv2.GaussianBlur(
+                depth_map_smooth, 
+                (int(7 * edge_smoothness) | 1, int(7 * edge_smoothness) | 1),
+                0
+            )
+            blend_factor = np.minimum(1.0, edge_smoothness / 1.5)
+            depth_map_smooth[edge_mask] = (
+                depth_map_smooth[edge_mask] * (1 - blend_factor) + 
+                edge_smoothed[edge_mask] * blend_factor
+            )
         
         # Calculate focal plane boundaries for determining blur amount
         half_thickness = focal_thickness / 2.0
@@ -676,30 +735,164 @@ class StereogramSBS3DConverter:
         
         # Create mask for in-focus region (no blur)
         in_focus_mask = np.logical_and(
-            depth_map >= lower_bound,
-            depth_map <= upper_bound
+            depth_map_smooth >= lower_bound,
+            depth_map_smooth <= upper_bound
         )
         
         # Calculate focus distance (how far each pixel is from the in-focus region)
-        focus_distance = np.zeros_like(depth_map)
+        focus_distance = np.zeros_like(depth_map_smooth)
         
         # Pixels closer than focal plane (foreground)
-        foreground_mask = depth_map < lower_bound
+        foreground_mask = depth_map_smooth < lower_bound
         if np.any(foreground_mask):
-            focus_distance[foreground_mask] = lower_bound - depth_map[foreground_mask]
+            focus_distance[foreground_mask] = lower_bound - depth_map_smooth[foreground_mask]
         
         # Pixels further than focal plane (background)
-        background_mask = depth_map > upper_bound
+        background_mask = depth_map_smooth > upper_bound
         if np.any(background_mask):
-            focus_distance[background_mask] = depth_map[background_mask] - upper_bound
+            focus_distance[background_mask] = depth_map_smooth[background_mask] - upper_bound
+        
+        # Apply additional smoothing to focus distance map at edges
+        if edge_smoothness > 0.5:
+            focus_distance_smoothed = cv2.GaussianBlur(
+                focus_distance, 
+                (int(5 * edge_smoothness) | 1, int(5 * edge_smoothness) | 1),
+                0
+            )
+            blend_factor = np.minimum(1.0, edge_smoothness / 1.5)
+            focus_distance[edge_mask] = (
+                focus_distance[edge_mask] * (1 - blend_factor) + 
+                focus_distance_smoothed[edge_mask] * blend_factor
+            )
+        
+        # Apply dithering to the focus distance to prevent banding
+        if enable_dithering:
+            # Scale noise by edge smoothness for better transitions
+            noise_scale = 0.005 * np.clip(edge_smoothness, 0.5, 2.0)
+            noise = np.random.normal(0, noise_scale, focus_distance.shape)
+            focus_distance = np.clip(focus_distance + noise, 0, 1)
         
         # Scale the focus distance to get blur kernel sizes
         # Multiply by blur_strength to control effect intensity
-        # Ensure odd kernel sizes (required by GaussianBlur)
+        # Ensure odd kernel sizes (required by kernels)
         blur_sizes = np.clip(2 * np.ceil(focus_distance * blur_strength * max_blur_size) + 1, 1, max_blur_size).astype(int)
+        
+        # Apply additional smoothing to blur sizes at edges
+        if edge_smoothness > 0.5:
+            blur_sizes_float = blur_sizes.astype(np.float32)
+            blur_sizes_smoothed = cv2.GaussianBlur(
+                blur_sizes_float, 
+                (int(5 * edge_smoothness) | 1, int(5 * edge_smoothness) | 1),
+                0
+            )
+            blur_sizes_smoothed = 2 * np.ceil(blur_sizes_smoothed / 2) - 1
+            
+            blend_factor = np.minimum(1.0, edge_smoothness / 1.5)
+            blur_sizes_float[edge_mask] = (
+                blur_sizes_float[edge_mask] * (1 - blend_factor) + 
+                blur_sizes_smoothed[edge_mask] * blend_factor
+            )
+            blur_sizes = np.clip(blur_sizes_float, 1, max_blur_size).astype(int)
         
         # Set blur size to 1 (no blur) for in-focus regions
         blur_sizes[in_focus_mask] = 1
+        
+        # Function to create bokeh kernel of given shape and size with anti-aliasing
+        def create_bokeh_kernel(size, shape='circle', aa_factor=4):
+            if size <= 1:
+                return np.ones((1, 1), dtype=np.float32)
+            
+            # For anti-aliasing, create a higher resolution kernel and then downsample
+            aa_size = size * aa_factor
+            r = aa_size // 2
+            
+            # Create a coordinate grid ensuring the dimensions are exactly (aa_size, aa_size)
+            y = np.linspace(-r, r, aa_size)
+            x = np.linspace(-r, r, aa_size)
+            xx, yy = np.meshgrid(x, y)
+            
+            # Initialize mask with correct dimensions
+            mask = np.zeros((aa_size, aa_size), dtype=np.float32)
+            
+            if shape == 'circle':
+                # Circular kernel with anti-aliasing
+                dist_squared = xx**2 + yy**2
+                r_squared = r**2
+                
+                # Create soft edge
+                soft_edge_width = r * 0.1
+                inner_r_squared = (r - soft_edge_width)**2
+                outer_r_squared = (r + soft_edge_width)**2
+                
+                # Create base mask (all ones inside inner circle)
+                mask = np.ones((aa_size, aa_size), dtype=np.float32)
+                
+                # Apply soft edge in transition area
+                edge_region = (dist_squared > inner_r_squared) & (dist_squared < outer_r_squared)
+                if np.any(edge_region):
+                    edge_values = 1.0 - (np.sqrt(dist_squared[edge_region]) - (r - soft_edge_width)) / (2 * soft_edge_width)
+                    mask[edge_region] = np.clip(edge_values, 0, 1)
+                
+                # Set outside to zero
+                outside_region = (dist_squared >= outer_r_squared)
+                mask[outside_region] = 0
+                
+            elif shape == 'hexagon' or shape == 'octagon':
+                # Simplified polygon implementation using OpenCV
+                sides = 6 if shape == 'hexagon' else 8
+                angles = np.linspace(0, 2*np.pi, sides+1)[:-1]
+                
+                # Create polygon points
+                polygon_points = []
+                for angle in angles:
+                    x_point = int(r * np.cos(angle) + r)
+                    y_point = int(r * np.sin(angle) + r)
+                    polygon_points.append([x_point, y_point])
+                
+                # Create binary mask
+                binary_mask = np.zeros((aa_size, aa_size), dtype=np.uint8)
+                cv2.fillPoly(binary_mask, [np.array(polygon_points)], 1)
+                
+                # Apply Gaussian blur for soft edges
+                mask = cv2.GaussianBlur(binary_mask.astype(np.float32), 
+                                      (int(aa_factor * 0.5) | 1, int(aa_factor * 0.5) | 1), 0)
+                
+                # Normalize center to 1.0
+                if mask[r, r] > 0:
+                    mask = mask / mask[r, r]
+                
+            else:
+                # Default to circle
+                dist_squared = xx**2 + yy**2
+                r_squared = r**2
+                
+                soft_edge_width = r * 0.1
+                inner_r_squared = (r - soft_edge_width)**2
+                outer_r_squared = (r + soft_edge_width)**2
+                
+                # Create base mask
+                mask = np.ones((aa_size, aa_size), dtype=np.float32)
+                
+                # Apply soft edge in transition area
+                edge_region = (dist_squared > inner_r_squared) & (dist_squared < outer_r_squared)
+                if np.any(edge_region):
+                    edge_values = 1.0 - (np.sqrt(dist_squared[edge_region]) - (r - soft_edge_width)) / (2 * soft_edge_width)
+                    mask[edge_region] = np.clip(edge_values, 0, 1)
+                
+                # Set outside to zero
+                outside_region = (dist_squared >= outer_r_squared)
+                mask[outside_region] = 0
+            
+            # Downsample to target size
+            if aa_factor > 1:
+                mask = cv2.resize(mask, (size, size), interpolation=cv2.INTER_AREA)
+            
+            # Normalize kernel
+            kernel_sum = np.sum(mask)
+            if kernel_sum > 0:
+                mask /= kernel_sum
+            
+            return mask
         
         # Get unique blur sizes
         unique_blur_sizes = np.unique(blur_sizes)
@@ -711,6 +904,18 @@ class StereogramSBS3DConverter:
         # Copy in-focus areas directly
         result[in_focus_mask] = image[in_focus_mask]
         
+        # Pre-compute bokeh kernels for different sizes
+        bokeh_kernels = {}
+        
+        # Prepare highlight image for bokeh effect
+        if highlight_boost > 1.0:
+            # Extract highlights by applying gamma correction to emphasize bright areas
+            highlights = np.power(image, highlight_boost)
+            # Normalize to keep the range in check
+            highlights = highlights / np.maximum(1e-5, np.max(highlights))
+        else:
+            highlights = image.copy()
+        
         # For each unique blur size, apply appropriate blur and copy to result
         for blur_size in unique_blur_sizes:
             if blur_size == 1:
@@ -721,11 +926,70 @@ class StereogramSBS3DConverter:
             if not np.any(blur_mask):
                 continue
                 
-            # Apply blur to the entire image (this is computationally intensive but ensures correct blur)
-            blurred = cv2.GaussianBlur(image, (blur_size, blur_size), 0)
+            # Get or create the bokeh kernel for this blur size
+            if blur_size not in bokeh_kernels:
+                bokeh_kernels[blur_size] = create_bokeh_kernel(blur_size, aperture_shape, aa_factor=4)
+            
+            # Apply bokeh blur with appropriate kernel
+            blurred = cv2.filter2D(image, -1, bokeh_kernels[blur_size])
+            
+            # Apply chromatic aberration if enabled
+            if chromatic_aberration > 0:
+                # Apply different blur sizes to R, G, B channels to simulate chromatic aberration
+                r_size = max(1, int(blur_size * (1 + chromatic_aberration)))
+                b_size = max(1, int(blur_size * (1 - chromatic_aberration)))
+                
+                # Get or create kernels
+                if r_size not in bokeh_kernels:
+                    bokeh_kernels[r_size] = create_bokeh_kernel(r_size, aperture_shape, aa_factor=4)
+                if b_size not in bokeh_kernels:
+                    bokeh_kernels[b_size] = create_bokeh_kernel(b_size, aperture_shape, aa_factor=4)
+                
+                # Apply different blur to R and B channels
+                r_blurred = cv2.filter2D(image[:,:,0], -1, bokeh_kernels[r_size])
+                b_blurred = cv2.filter2D(image[:,:,2], -1, bokeh_kernels[b_size])
+                
+                # Replace channels
+                blurred[:,:,0] = r_blurred
+                blurred[:,:,2] = b_blurred
+            
+            # Apply highlight boost for bokeh effect
+            if highlight_boost > 1.0:
+                # Use a larger kernel for highlights to create beautiful bokeh spots
+                highlight_size = min(max_blur_size, blur_size + 4)
+                if highlight_size not in bokeh_kernels:
+                    bokeh_kernels[highlight_size] = create_bokeh_kernel(highlight_size, aperture_shape, aa_factor=4)
+                
+                highlights_blurred = cv2.filter2D(highlights, -1, bokeh_kernels[highlight_size])
+                
+                # Add highlights to blurred image for the bokeh effect
+                blurred = np.maximum(blurred, highlights_blurred)
             
             # Copy the blurred pixels to the result for this blur level
             result[blur_mask] = blurred[blur_mask]
+        
+        # Apply a final bilateral filter to edges for smoother transitions
+        if edge_smoothness > 0.8:
+            # Create a filtered version for edges
+            edge_filtered = cv2.bilateralFilter(
+                result,
+                d=int(5 * edge_smoothness),
+                sigmaColor=0.05,
+                sigmaSpace=int(5 * edge_smoothness)
+            )
+            
+            # Only blend at the edges
+            blend_factor = np.minimum(1.0, (edge_smoothness - 0.8) / 1.0)
+            result[edge_mask] = (
+                result[edge_mask] * (1 - blend_factor) +
+                edge_filtered[edge_mask] * blend_factor
+            )
+        
+        # Apply subtle dithering to prevent banding
+        if enable_dithering:
+            # Add very subtle noise to prevent banding in gradients
+            noise = np.random.normal(0, 0.002, result.shape)
+            result = np.clip(result + noise, 0, 1)
         
         return result
     
@@ -964,7 +1228,7 @@ class StereogramSBS3DConverter:
         self.inpainting_patch_overlap = patch_overlap
         self.inpainting_high_quality = high_quality
         
-    def set_color_quality(self, high_color_quality=True, apply_dithering=False, dithering_level=1.0):
+    def set_color_quality(self, high_color_quality=True, apply_dithering=True, dithering_level=1.0):
         """Configure color quality settings.
         
         Args:
@@ -1004,15 +1268,22 @@ class StereogramSBS3DConverter:
         enhanced = cv2.bilateralFilter(img, d=5, sigmaColor=50, sigmaSpace=50)
         return enhanced
         
-    def apply_depth_based_blur(self, image, depth_map, focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21):
+    def apply_depth_based_blur(self, image, depth_map, focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21, 
+                             aperture_shape='circle', highlight_boost=1.5, enable_dithering=True, chromatic_aberration=0.0,
+                             edge_smoothness=1.0):
         """
         Apply realistic depth-of-field blur based on the depth map
         
         This enhanced version:
         1. Processes depth layers from back to front for realistic occlusion
-        2. Creates a "spread" effect for out-of-focus areas with ultra-smooth transitions
-        3. Simulates natural bokeh-style blurring with exponential transparency falloff
-        4. Uses linear light space for physically accurate color blending
+        2. Uses true disk/aperture-shaped kernels instead of Gaussian for realistic bokeh
+        3. Enhances bright highlights to simulate lens bokeh effects
+        4. Creates a "spread" effect for out-of-focus areas with ultra-smooth transitions
+        5. Simulates natural bokeh-style blurring with exponential transparency falloff
+        6. Uses linear light space for physically accurate color blending
+        7. Applies dithering to prevent banding artifacts
+        8. Optional chromatic aberration simulation
+        9. Advanced edge detection for smoother transitions at depth boundaries
         
         Args:
             image: Original image to apply blur to
@@ -1021,6 +1292,11 @@ class StereogramSBS3DConverter:
             focal_thickness: Thickness of the in-focus region (0-1)
             blur_strength: Strength of the blur effect (multiplier)
             max_blur_size: Maximum kernel size for blur
+            aperture_shape: Shape of the bokeh ('circle', 'hexagon', 'octagon')
+            highlight_boost: How much to boost bright areas (1.0 = no boost)
+            enable_dithering: Whether to apply dithering to prevent banding
+            chromatic_aberration: Amount of color channel separation (0.0 = none)
+            edge_smoothness: Controls the smoothness of transitions at depth boundaries (0.5-2.0)
             
         Returns:
             Image with realistic depth-based blur applied
@@ -1030,17 +1306,67 @@ class StereogramSBS3DConverter:
             normalized_depth = depth_map / depth_map.max()
         else:
             normalized_depth = depth_map.copy()
+        
+        # IMPROVED EDGE HANDLING: Use a more sophisticated edge detection
+        # Instead of Canny, use gradient magnitude for more continuous edge detection
+        sobelx = cv2.Sobel(normalized_depth, cv2.CV_32F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(normalized_depth, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+        
+        # Normalize gradient magnitude to create a continuous edge weight map
+        if gradient_magnitude.max() > 0:
+            edge_weight = gradient_magnitude / gradient_magnitude.max()
+        else:
+            edge_weight = gradient_magnitude
+            
+        # Apply smoothing on the edge weight map
+        edge_weight = cv2.GaussianBlur(edge_weight, (9, 9), 0)
+        
+        # Create a gradually decreasing edge influence mask
+        edge_influence = np.clip(edge_weight * edge_smoothness * 4, 0, 1)
+        
+        # Preserve depth edges by applying stronger bilateral filtering
+        normalized_depth = cv2.bilateralFilter(
+            normalized_depth, 
+            d=int(9 * edge_smoothness),  # Diameter of pixel neighborhood
+            sigmaColor=0.1,  # Filter sigma in color space
+            sigmaSpace=int(7 * edge_smoothness)  # Filter sigma in coordinate space
+        )
+        
+        # Apply additional adaptive smoothing at the edges based on gradient
+        if edge_smoothness > 0.5:
+            # Create increasingly smoothed versions
+            s1 = cv2.GaussianBlur(normalized_depth, (5, 5), 0)
+            s2 = cv2.GaussianBlur(normalized_depth, (9, 9), 0)
+            s3 = cv2.GaussianBlur(normalized_depth, (15, 15), 0)
+            
+            # Blend based on edge magnitude - stronger edges get more smoothing
+            # This creates a progressive falloff effect
+            edge_mask_strong = edge_influence > 0.7
+            edge_mask_medium = (edge_influence > 0.4) & (edge_influence <= 0.7)
+            edge_mask_light = (edge_influence > 0.1) & (edge_influence <= 0.4)
+            
+            # Apply progressive smoothing based on edge strength
+            if np.any(edge_mask_strong):
+                normalized_depth[edge_mask_strong] = s3[edge_mask_strong]
+            if np.any(edge_mask_medium):
+                normalized_depth[edge_mask_medium] = s2[edge_mask_medium]
+            if np.any(edge_mask_light):
+                normalized_depth[edge_mask_light] = s1[edge_mask_light]
             
         # Calculate focal plane boundaries
         half_thickness = focal_thickness / 2.0
         lower_bound = max(0, focal_distance - half_thickness)
         upper_bound = min(1.0, focal_distance + half_thickness)
         
-        # Create mask for in-focus region (no blur)
-        in_focus_mask = np.logical_and(
-            normalized_depth >= lower_bound,
-            normalized_depth <= upper_bound
+        # Create mask for in-focus region (no blur) with soft transition
+        in_focus_distance = np.maximum(
+            lower_bound - normalized_depth, 
+            normalized_depth - upper_bound
         )
+        in_focus_distance = np.clip(in_focus_distance, 0, half_thickness)
+        in_focus_factor = 1.0 - (in_focus_distance / half_thickness)
+        in_focus_mask = in_focus_factor >= 0.95  # Hard cutoff for true in-focus areas
         
         # Calculate focus distance (how far each pixel is from the in-focus region)
         focus_distance = np.zeros_like(normalized_depth)
@@ -1055,10 +1381,45 @@ class StereogramSBS3DConverter:
         if np.any(background_mask):
             focus_distance[background_mask] = normalized_depth[background_mask] - upper_bound
         
-        # Scale the focus distance to get blur kernel sizes
-        # Multiply by blur_strength to control effect intensity
-        # Ensure odd kernel sizes (required by GaussianBlur)
-        blur_sizes = np.clip(2 * np.ceil(focus_distance * blur_strength * max_blur_size) + 1, 1, max_blur_size).astype(int)
+        # Apply extra smoothing to the focus distance map at edges
+        if edge_smoothness > 0.5:
+            focus_distance_smoothed = cv2.GaussianBlur(
+                focus_distance, 
+                (int(7 * edge_smoothness) | 1, int(7 * edge_smoothness) | 1),  # Ensure odd kernel size
+                0
+            )
+            
+            # Blend based on edge influence
+            blend_factor = np.clip(edge_influence * 1.5, 0, 1.0)
+            focus_distance = (1 - blend_factor) * focus_distance + blend_factor * focus_distance_smoothed
+        
+        # Apply dithering to the focus distance to prevent banding
+        if enable_dithering:
+            # Add noise scaled by edge smoothness
+            noise_scale = 0.01 * np.clip(edge_smoothness, 0.5, 2.0)
+            noise = np.random.normal(0, noise_scale, focus_distance.shape)
+            focus_distance = np.clip(focus_distance + noise, 0, 1)
+        
+        # Scale the focus distance to get blur kernel sizes with smooth progression
+        # REVERTED: Remove the enhanced blur strength multiplier
+        blur_sizes_float = focus_distance * blur_strength * max_blur_size
+        
+        # Apply additional smoothing to blur sizes at edges
+        if edge_smoothness > 0.5:
+            blur_sizes_smoothed = cv2.GaussianBlur(
+                blur_sizes_float, 
+                (int(5 * edge_smoothness) | 1, int(5 * edge_smoothness) | 1),
+                0
+            )
+            
+            # Use the edge influence mask to blend original and smoothed blur sizes
+            blend_factor = np.clip(edge_influence * 1.8, 0, 1.0)
+            blur_sizes_float = (1 - blend_factor) * blur_sizes_float + blend_factor * blur_sizes_smoothed
+        
+        # REVERTED: Remove minimum blur enhancement
+        # Ensure odd kernel sizes for convolution operations
+        blur_sizes = 2 * np.ceil(blur_sizes_float / 2) + 1
+        blur_sizes = np.clip(blur_sizes, 1, max_blur_size).astype(int)
         
         # Set blur size to 1 (no blur) for in-focus regions
         blur_sizes[in_focus_mask] = 1
@@ -1068,29 +1429,180 @@ class StereogramSBS3DConverter:
         result = np.zeros((h, w, 4), dtype=np.float32)
         
         # Get unique depth values and sort them (from far to near)
-        # We'll use these to process the image in layers from back to front
-        depth_bins = 50  # Number of discrete depth layers to process
+        depth_bins = int(50 * np.clip(edge_smoothness, 0.5, 2.5))  # More bins for smoother transitions
         depth_values = np.linspace(1.0, 0.0, depth_bins)  # From far (1.0) to near (0.0)
         
         # Convert to linear light space for physically accurate color mixing
-        # Standard gamma value is 2.2 for realistic light handling
         gamma = 2.2
-        # Use float32 for better precision during processing
         float_image = image.astype(np.float32)
-        # Convert from perceptual (sRGB) to linear light space
         linear_image = np.power(float_image / 255.0, gamma)
+        
+        # Prepare highlight image for bokeh effect
+        if highlight_boost > 1.0:
+            # Extract highlights by applying gamma correction to emphasize bright areas
+            highlights = np.power(linear_image, highlight_boost)
+            # Normalize to keep the range in check, but handle potential division by zero
+            max_val = np.maximum(1e-5, np.max(highlights))
+            highlights = highlights / max_val
+        else:
+            highlights = linear_image.copy()
         
         # First, add in-focus areas as the base layer (these are always visible)
         # Convert to 4 channels (RGB + alpha)
         linear_image_rgba = np.zeros((h, w, 4), dtype=np.float32)
         linear_image_rgba[:,:,:3] = linear_image
-        linear_image_rgba[:,:,3] = 1.0  # Full opacity (now in 0-1 range for linear space)
+        linear_image_rgba[:,:,3] = 1.0  # Full opacity
         
-        # Copy in-focus areas to result with full opacity
-        result[in_focus_mask] = linear_image_rgba[in_focus_mask]
+        # For smoother transitions, use the in-focus factor instead of a hard mask
+        result[:,:,:3] = linear_image
+        result[:,:,3] = 1.0  # Initialize all pixels as visible
         
-        # Track which pixels have been filled with closer objects (fully opaque)
-        filled_pixels = in_focus_mask.copy()
+        # Create a mask for truly empty (unfilled) regions
+        unfilled_mask = np.ones((h, w), dtype=bool)
+        
+        # Create a cumulative opacity mask to handle progressive transparency blending
+        cumulative_opacity = np.zeros((h, w), dtype=np.float32)
+        
+        # Pre-compute bokeh kernels for different sizes
+        bokeh_kernels = {}
+        
+        # Function to create bokeh kernel of a given shape and size with anti-aliasing
+        def create_bokeh_kernel(size, shape='circle', aa_factor=4):
+            if size <= 1:
+                return np.ones((1, 1), dtype=np.float32)
+            
+            # For anti-aliasing, create a higher resolution kernel and then downsample
+            aa_size = size * aa_factor
+            r = aa_size // 2
+            
+            # Create a coordinate grid ensuring the dimensions are exactly (aa_size, aa_size)
+            y = np.linspace(-r, r, aa_size)
+            x = np.linspace(-r, r, aa_size)
+            xx, yy = np.meshgrid(x, y)
+            
+            # Initialize mask with correct dimensions
+            mask = np.zeros((aa_size, aa_size), dtype=np.float32)
+            
+            if shape == 'circle':
+                # Circular kernel with anti-aliasing
+                dist_squared = xx**2 + yy**2
+                r_squared = r**2
+                
+                # Create soft edge with wider transition
+                soft_edge_width = r * 0.15  # Increased edge width for smoother transition
+                inner_r_squared = (r - soft_edge_width)**2
+                outer_r_squared = (r + soft_edge_width)**2
+                
+                # Create base mask (all ones inside inner circle)
+                mask = np.ones((aa_size, aa_size), dtype=np.float32)
+                
+                # Apply soft edge in transition area using a smoother falloff
+                edge_region = (dist_squared > inner_r_squared) & (dist_squared < outer_r_squared)
+                if np.any(edge_region):
+                    # Use a sinusoidal falloff for smoother transition
+                    t = (np.sqrt(dist_squared[edge_region]) - (r - soft_edge_width)) / (2 * soft_edge_width)
+                    edge_values = 0.5 * (1 + np.cos(np.pi * t))
+                    mask[edge_region] = np.clip(edge_values, 0, 1)
+                
+                # Set outside to zero
+                outside_region = (dist_squared >= outer_r_squared)
+                mask[outside_region] = 0
+                
+            elif shape == 'hexagon' or shape == 'octagon':
+                # Use optimized polygon implementation
+                sides = 6 if shape == 'hexagon' else 8
+                angles = np.linspace(0, 2*np.pi, sides+1)[:-1]
+                
+                # Create polygon points with a slightly larger radius for the base shape
+                base_points = []
+                for angle in angles:
+                    x_point = int(r * 1.05 * np.cos(angle) + r)
+                    y_point = int(r * 1.05 * np.sin(angle) + r)
+                    base_points.append([x_point, y_point])
+                
+                # Create a smaller polygon for the inner fully opaque region
+                inner_points = []
+                inner_r = r * 0.9  # 90% of the radius for inner polygon
+                for angle in angles:
+                    x_point = int(inner_r * np.cos(angle) + r)
+                    y_point = int(inner_r * np.sin(angle) + r)
+                    inner_points.append([x_point, y_point])
+                
+                # Create masks for inner and outer polygons
+                outer_mask = np.zeros((aa_size, aa_size), dtype=np.uint8)
+                inner_mask = np.zeros((aa_size, aa_size), dtype=np.uint8)
+                
+                cv2.fillPoly(outer_mask, [np.array(base_points)], 1)
+                cv2.fillPoly(inner_mask, [np.array(inner_points)], 1)
+                
+                # Calculate transition region
+                transition = outer_mask.astype(np.float32) - inner_mask.astype(np.float32)
+                
+                # Blur the transition region for anti-aliasing
+                transition_blurred = cv2.GaussianBlur(
+                    transition, 
+                    (int(aa_factor * 0.7) | 1, int(aa_factor * 0.7) | 1), 
+                    0
+                )
+                
+                # Combine inner (full opacity) with transition (varying opacity)
+                mask = inner_mask.astype(np.float32) + transition_blurred
+                
+                # Ensure center is 1.0 for proper normalization
+                if mask[r, r] > 0:
+                    mask = mask / mask[r, r]
+                
+            else:
+                # Default to circle
+                dist_squared = xx**2 + yy**2
+                r_squared = r**2
+                
+                soft_edge_width = r * 0.15  # Wider edge for smoother transition
+                inner_r_squared = (r - soft_edge_width)**2
+                outer_r_squared = (r + soft_edge_width)**2
+                
+                # Create base mask
+                mask = np.ones((aa_size, aa_size), dtype=np.float32)
+                
+                # Apply soft edge with sinusoidal falloff
+                edge_region = (dist_squared > inner_r_squared) & (dist_squared < outer_r_squared)
+                if np.any(edge_region):
+                    t = (np.sqrt(dist_squared[edge_region]) - (r - soft_edge_width)) / (2 * soft_edge_width)
+                    edge_values = 0.5 * (1 + np.cos(np.pi * t))
+                    mask[edge_region] = np.clip(edge_values, 0, 1)
+                
+                # Set outside to zero
+                outside_region = (dist_squared >= outer_r_squared)
+                mask[outside_region] = 0
+            
+            # Downsample to target size using area interpolation for best anti-aliasing
+            if aa_factor > 1:
+                mask = cv2.resize(mask, (size, size), interpolation=cv2.INTER_AREA)
+            
+            # Normalize kernel to maintain image brightness
+            kernel_sum = np.sum(mask)
+            if kernel_sum > 0:
+                mask /= kernel_sum
+            
+            return mask
+        
+        # First pass: Create a subtle base blur layer just to prevent dark edges
+        # This is a minimal base layer to avoid dark strokes while preserving original blur strength
+        base_blur_size = max(3, int(np.mean(blur_sizes) * 0.5))  # Use a more conservative blur
+        if base_blur_size > 1:
+            base_kernel = create_bokeh_kernel(
+                base_blur_size, 
+                aperture_shape,
+                aa_factor=4
+            )
+            base_blurred = cv2.filter2D(linear_image, -1, base_kernel)
+        else:
+            base_blurred = linear_image.copy()
+            
+        # Initialize the result with this base blur, but with reduced opacity
+        # This keeps the original blur strength more apparent while eliminating dark edges
+        base_opacity = 0.3  # Lower opacity for subtler effect
+        result[:,:,:3] = base_blurred * base_opacity + linear_image * (1 - base_opacity)
         
         # Process each depth layer from far to near
         for depth_val in depth_values:
@@ -1101,99 +1613,171 @@ class StereogramSBS3DConverter:
                 normalized_depth < depth_val + layer_thickness
             )
             
-            # Exclude in-focus areas and already filled pixels
-            layer_mask = np.logical_and(layer_mask, ~filled_pixels)
-            
             # If no pixels in this layer, skip
             if not np.any(layer_mask):
                 continue
             
-            # Get blur size for this layer
-            layer_blur_size = blur_sizes[layer_mask].max()
-            if layer_blur_size <= 1:
-                # No blur needed, just copy the pixels with full opacity
-                result[layer_mask, :3] = linear_image[layer_mask]
-                result[layer_mask, 3] = 1.0
-            else:
-                # Apply blur to the entire image (this simulates the spreading effect)
-                # Blur in linear light space for physically accurate light spread
-                blurred = cv2.GaussianBlur(linear_image, (layer_blur_size, layer_blur_size), 0)
+            # Get average blur size for this layer
+            layer_blur_sizes = blur_sizes[layer_mask]
+            if len(layer_blur_sizes) == 0:
+                continue
                 
-                # Apply dilated mask to simulate bokeh/spread effect with ultra-smooth transitions
-                if layer_blur_size > 1:
-                    # Calculate more aggressive spread based on blur size
-                    # Larger blur = wider spread
-                    spread_factor = 1.0 + (layer_blur_size / max_blur_size)  # Ranges from 1.0 to 2.0
-                    
-                    # Create a dilated mask that spreads the effect
-                    # Use larger kernel for more aggressive spread
-                    kernel_size = max(5, int(layer_blur_size * spread_factor * 0.5))
-                    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-                    
-                    # Create a series of dilated masks with decreasing opacity
-                    # Use more steps for smoother transition
-                    spread_steps = 7  # Increased from 3 to 7 for much smoother falloff
-                    
-                    # Core pixels of this layer - always appear with full opacity
-                    # Mark these as filled immediately
-                    result[layer_mask, :3] = blurred[layer_mask]
-                    result[layer_mask, 3] = 1.0
-                    filled_pixels = np.logical_or(filled_pixels, layer_mask)
-                    
-                    # Create initial dilated mask
-                    base_dilated = cv2.dilate(layer_mask.astype(np.uint8), kernel)
-                    
-                    for i in range(1, spread_steps + 1):
-                        # Calculate non-linear dilation amount that increases with each step
-                        # This creates wider spread zones with each step
-                        dilation_factor = i / spread_steps
-                        # Use exponential function for more aggressive spread
-                        dilation_factor = np.power(dilation_factor, 0.7)  # < 1 means more aggressive spread
-                        
-                        dilation_amount = max(1, int(kernel_size * dilation_factor * 2))
-                        step_kernel = np.ones((dilation_amount, dilation_amount), np.uint8)
-                        
-                        # Dilate from the base dilated mask each time
-                        # This creates more even spreading in all directions
-                        dilated_mask = cv2.dilate(base_dilated, step_kernel)
-                        
-                        # Calculate alpha value for this dilation step using exponential falloff
-                        # This creates much softer transitions
-                        # Use exponential falloff for much smoother transitions (non-linear)
-                        alpha_falloff = np.exp(-3.0 * (i / spread_steps))  # Exponential falloff
-                        
-                        # Only apply spread effect to unfilled areas
-                        spread_mask = np.logical_and(dilated_mask.astype(bool), ~filled_pixels)
-                        
-                        if np.any(spread_mask):
-                            # Apply blurred pixels with calculated alpha
-                            result[spread_mask, :3] = blurred[spread_mask]
-                            result[spread_mask, 3] = alpha_falloff
-                            
-                            # Don't mark these pixels as filled, to allow layering of semi-transparent areas
-                            # from different depth levels
-                else:
-                    # No spread needed, just copy with full opacity
-                    result[layer_mask, :3] = blurred[layer_mask]
-                    result[layer_mask, 3] = 1.0
-                    
-                    # Mark the core layer pixels as filled (fully opaque)
-                    filled_pixels = np.logical_or(filled_pixels, layer_mask)
+            # Get blur size for this layer - REVERTED to original max calculation
+            layer_blur_size = int(np.max(layer_blur_sizes))
+            if layer_blur_size <= 1:
+                # For in-focus areas, just use the original image
+                result[layer_mask, :3] = linear_image[layer_mask]
+                cumulative_opacity[layer_mask] = 1.0
+                unfilled_mask[layer_mask] = False
+                continue
+            
+            # Get or create the bokeh kernel for this size
+            if layer_blur_size not in bokeh_kernels:
+                bokeh_kernels[layer_blur_size] = create_bokeh_kernel(
+                    layer_blur_size, 
+                    aperture_shape,
+                    aa_factor=4
+                )
+            
+            # Apply bokeh blur with disk/aperture kernel for base image
+            blurred = cv2.filter2D(linear_image, -1, bokeh_kernels[layer_blur_size])
+            
+            # Apply chromatic aberration if enabled
+            if chromatic_aberration > 0:
+                # Apply different blur sizes to R, G, B channels - REVERTED to original values
+                r_size = max(1, int(layer_blur_size * (1 + chromatic_aberration)))
+                b_size = max(1, int(layer_blur_size * (1 - chromatic_aberration)))
+                
+                # Get or create kernels
+                if r_size not in bokeh_kernels:
+                    bokeh_kernels[r_size] = create_bokeh_kernel(r_size, aperture_shape, aa_factor=4)
+                if b_size not in bokeh_kernels:
+                    bokeh_kernels[b_size] = create_bokeh_kernel(b_size, aperture_shape, aa_factor=4)
+                
+                # Apply different blur to R and B channels
+                r_blurred = cv2.filter2D(linear_image[:,:,0], -1, bokeh_kernels[r_size])
+                b_blurred = cv2.filter2D(linear_image[:,:,2], -1, bokeh_kernels[b_size])
+                
+                # Replace channels
+                blurred[:,:,0] = r_blurred
+                blurred[:,:,2] = b_blurred
+            
+            # Apply highlight boost for bokeh effect - REVERTED to original
+            if highlight_boost > 1.0:
+                # Use a larger kernel for highlights
+                highlight_size = min(max_blur_size, layer_blur_size + 4)
+                if highlight_size not in bokeh_kernels:
+                    bokeh_kernels[highlight_size] = create_bokeh_kernel(highlight_size, aperture_shape, aa_factor=4)
+                
+                highlights_blurred = cv2.filter2D(highlights, -1, bokeh_kernels[highlight_size])
+                
+                # Add highlights to blurred image
+                blurred = np.maximum(blurred, highlights_blurred)
+            
+            # Create a soft mask for this layer that extends beyond the hard mask
+            # This creates a gradual transition at depth boundaries
+            layer_mask_float = layer_mask.astype(np.float32)
+            extended_mask = cv2.dilate(
+                layer_mask_float, 
+                np.ones((3, 3), np.uint8), 
+                iterations=2
+            )
+            extended_mask = cv2.GaussianBlur(extended_mask, (5, 5), 0)
+            
+            # Add edge-aware modulation
+            if edge_smoothness > 0.5:
+                # Further smooth transitions at edges
+                edge_aware_factor = np.clip(1.0 - edge_influence * 2.0, 0, 1)
+                extended_mask = extended_mask * edge_aware_factor + layer_mask_float * (1 - edge_aware_factor)
+                extended_mask = cv2.GaussianBlur(extended_mask, (5, 5), 0)
+            
+            # Copy the blurred pixels using the extended mask as alpha
+            layer_alpha = np.expand_dims(extended_mask, axis=2)
+            new_alpha = np.minimum(1.0, cumulative_opacity + extended_mask)
+            alpha_diff = new_alpha - cumulative_opacity
+            
+            # Only blend where alpha_diff is positive (new content to add)
+            blend_mask = alpha_diff > 0.01
+            if np.any(blend_mask):
+                # Update colors with this layer's contribution
+                for c in range(3):
+                    # Blend colors based on the alpha differential
+                    result[:,:,c] = np.where(
+                        blend_mask,
+                        (result[:,:,c] * cumulative_opacity + blurred[:,:,c] * alpha_diff) / np.maximum(0.001, new_alpha),
+                        result[:,:,c]
+                    )
+                
+                # Update the cumulative opacity
+                cumulative_opacity = new_alpha
+                
+                # Update unfilled mask
+                unfilled_mask = unfilled_mask & ~blend_mask
         
-        # Create the final composited image by blending all layers
-        # Use proper alpha compositing for realistic results
-        # First, create a background canvas (we'll use black)
-        final_result_linear = np.zeros_like(linear_image)
+        # Ensure all pixels have been processed
+        if np.any(unfilled_mask):
+            # Fill any remaining areas with original image
+            result[unfilled_mask, :3] = linear_image[unfilled_mask]
+            result[unfilled_mask, 3] = 1.0
         
-        # Apply alpha compositing formula: dst = (src * alpha) + (dst * (1 - alpha))
-        # Since we're starting with a black background, the initial dst is zeros
-        alpha = result[:,:,3][:,:,np.newaxis]  # Add dimension for broadcasting
-        
-        # Apply alpha compositing in linear light space
-        final_result_linear = result[:,:,:3] * alpha
+        # Apply final edge-specific processing to smooth transitions
+        if edge_smoothness > 0.8:
+            # Identify areas with high edge influence for targeted smoothing
+            strong_edge_mask = edge_influence > 0.3
+            if np.any(strong_edge_mask):
+                # Create a version with bilateral filtering for these areas
+                edge_filtered = cv2.bilateralFilter(
+                    result[:,:,:3], 
+                    d=int(5 * edge_smoothness),
+                    sigmaColor=0.05,
+                    sigmaSpace=int(5 * edge_smoothness)
+                )
+                
+                # Blend only at strong edges with adaptive factor
+                blend_factor = np.clip((edge_influence - 0.3) * 2 * edge_smoothness, 0, 0.9)
+                
+                # Fix: Create a proper 3D blend factor for broadcasting
+                for c in range(3):
+                    # Use where() with the mask directly, not the extracted values
+                    result[:,:,c] = np.where(
+                        strong_edge_mask,
+                        result[:,:,c] * (1 - blend_factor) + edge_filtered[:,:,c] * blend_factor,
+                        result[:,:,c]
+                    )
         
         # Convert back from linear light space to perceptual space (sRGB)
-        final_result_srgb = np.power(final_result_linear, 1.0/gamma) * 255.0
+        # Handle potential NaN/inf values with np.nan_to_num
+        final_result_linear = np.nan_to_num(result[:,:,:3], nan=0.0, posinf=1.0, neginf=0.0)
+        final_result_srgb = np.power(np.clip(final_result_linear, 0.0001, 1.0), 1.0/gamma) * 255.0
+        
+        # Apply final anti-banding dithering
+        if enable_dithering:
+            # Create targeted dithering based on color gradients
+            gray = cv2.cvtColor((final_result_srgb/255.0).astype(np.float32), cv2.COLOR_RGB2GRAY)
+            gradient_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            gradient_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            gradient = np.sqrt(gradient_x**2 + gradient_y**2)
+            
+            # Normalize gradient to 0-1
+            if gradient.max() > 0:
+                gradient_norm = gradient / gradient.max()
+            else:
+                gradient_norm = gradient
+                
+            # Apply stronger dithering to subtle gradients (prone to banding)
+            subtle_gradients = (gradient_norm > 0.01) & (gradient_norm < 0.1)
+            dither_strength = np.ones_like(gradient_norm) * 0.1
+            dither_strength[subtle_gradients] = 0.7
+            
+            # Generate high-quality blue noise
+            noise = np.random.normal(0, 0.5, final_result_srgb.shape)
+            blue_noise = cv2.GaussianBlur(noise, (0, 0), 1.5) - cv2.GaussianBlur(noise, (0, 0), 0.5)
+            
+            # Scale noise by dither strength
+            blue_noise = blue_noise * np.expand_dims(dither_strength, axis=2)
+            
+            # Apply blue noise dithering
+            final_result_srgb = np.clip(final_result_srgb + blue_noise, 0, 255)
         
         # Convert back to uint8
         return np.clip(final_result_srgb, 0, 255).astype(np.uint8)
@@ -1246,7 +1830,9 @@ class StereogramSBS3DConverter:
         return (result * 255).astype(np.uint8)
 
     def generate_sbs_stereo(self, image_path, output_path=None, shift_factor=0.05, efficient_mode=True, 
-                           apply_depth_blur=False, focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21):
+                           apply_depth_blur=False, focal_distance=0.5, focal_thickness=0.1, blur_strength=1.0, max_blur_size=21,
+                           aperture_shape='circle', highlight_boost=1.5, enable_dithering=True, chromatic_aberration=0.0,
+                           edge_smoothness=1.0):
         """Generate side-by-side stereo 3D image from 2D image
         
         Args:
@@ -1259,94 +1845,94 @@ class StereogramSBS3DConverter:
             focal_thickness: Thickness of the in-focus region (0-1)
             blur_strength: Strength of the blur effect (multiplier)
             max_blur_size: Maximum kernel size for blur
+            aperture_shape: Shape of the bokeh ('circle', 'hexagon', 'octagon')
+            highlight_boost: How much to boost bright areas (1.0 = no boost)
+            enable_dithering: Whether to apply dithering to prevent banding
+            chromatic_aberration: Amount of color channel separation (0.0 = none)
+            edge_smoothness: Controls the smoothness of transitions at depth boundaries (0.5-2.0)
             
         Returns:
-            Tuple of (combined stereo image, left view, right view, depth map)
+            Tuple of (stereo_sbs, depth_map)
         """
-        # Load image
+        # Load image if path is provided
         if isinstance(image_path, str):
             image = cv2.imread(image_path)
+            if image is None:
+                raise ValueError(f"Could not load image from {image_path}")
         else:
+            # Assume it's already an image array
             image = image_path
             
-        # Estimate depth
+        # Generate depth map
+        print("Estimating depth map...")
         depth_map = self.estimate_depth(image)
         
-        # Generate stereo views with integrated blur effect if enabled
-        if apply_depth_blur:
-            print(f"Applying depth-based blur (focal distance: {focal_distance}, thickness: {focal_thickness}, strength: {blur_strength})")
-        
-        # Generate the stereo views with integrated depth blur (if enabled)
+        # Create stereo views
+        print(f"Generating stereo views (shift_factor={shift_factor})...")
         left_view, right_view, left_holes, right_holes = self.generate_stereo_views(
-            image, depth_map, shift_factor, 
+            image, 
+            depth_map, 
+            shift_factor=shift_factor, 
             apply_depth_blur=apply_depth_blur,
             focal_distance=focal_distance,
             focal_thickness=focal_thickness,
             blur_strength=blur_strength,
-            max_blur_size=max_blur_size
+            max_blur_size=max_blur_size,
+            aperture_shape=aperture_shape,
+            highlight_boost=highlight_boost,
+            enable_dithering=enable_dithering,
+            chromatic_aberration=chromatic_aberration,
+            edge_smoothness=edge_smoothness
         )
         
-        # Apply inpainting to fill holes
-        if self.use_advanced_infill:
-            print("Applying advanced inpainting...")
-            if np.any(left_holes):
-                print(f"  Inpainting left view with {np.sum(left_holes)} hole pixels")
-                # Try to use fill_holes_preserving_originals for better quality
-                try:
-                    left_view = self.fill_holes_preserving_originals(
-                        image, left_view, left_holes, depth_map,
-                        shift_factor=shift_factor, is_left_view=True
-                    )
-                except Exception as e:
-                    print(f"Error using preserving method: {e}, falling back to standard advanced infill")
-                    left_view = self.advanced_infill(left_view, left_holes, efficient_mode)
-                    
-            if np.any(right_holes):
-                print(f"  Inpainting right view with {np.sum(right_holes)} hole pixels")
-                # Try to use fill_holes_preserving_originals for better quality
-                try:
-                    right_view = self.fill_holes_preserving_originals(
-                        image, right_view, right_holes, depth_map,
-                        shift_factor=shift_factor, is_left_view=False
-                    )
-                except Exception as e:
-                    print(f"Error using preserving method: {e}, falling back to standard advanced infill")
-                    right_view = self.advanced_infill(right_view, right_holes, efficient_mode)
-        else:
-            # Fallback to basic inpainting if advanced is not available
-            if np.any(left_holes):
+        # Fill holes if there are any
+        if np.any(left_holes):
+            print("Filling holes in left view...")
+            if self.use_advanced_infill:
+                left_view = self.advanced_infill(left_view, left_holes, efficient_mode=efficient_mode)
+            else:
                 left_view = self.basic_infill(left_view, left_holes)
-            if np.any(right_holes):
+        
+        if np.any(right_holes):
+            print("Filling holes in right view...")
+            if self.use_advanced_infill:
+                right_view = self.advanced_infill(right_view, right_holes, efficient_mode=efficient_mode)
+            else:
                 right_view = self.basic_infill(right_view, right_holes)
         
-        # Apply color quality enhancement with stronger anti-banding
-        try:
-            # Skip anti-banding if high_color_quality is False
-            if self.high_color_quality:
-                if hasattr(self, '_enhanced_anti_banding'):
-                    left_view = self._enhanced_anti_banding(left_view)
-                    right_view = self._enhanced_anti_banding(right_view)
-                else:
-                    left_view = self._enhance_image_quality(left_view)
-                    right_view = self._enhance_image_quality(right_view)
-        except Exception as e:
-            print(f"Enhanced anti-banding failed: {e}, falling back to basic enhancement")
+        # Apply post-processing for better quality
+        if hasattr(self, 'high_color_quality') and self.high_color_quality:
             left_view = self._enhance_image_quality(left_view)
             right_view = self._enhance_image_quality(right_view)
         
-        # Combine into side-by-side stereo image
+        # Make sure the views have the same height
+        h_left, w_left = left_view.shape[:2]
+        h_right, w_right = right_view.shape[:2]
+        
+        if h_left != h_right:
+            # Resize to match heights
+            if h_left > h_right:
+                scale = h_right / h_left
+                new_width = int(w_left * scale)
+                left_view = cv2.resize(left_view, (new_width, h_right))
+            else:
+                scale = h_left / h_right
+                new_width = int(w_right * scale)
+                right_view = cv2.resize(right_view, (new_width, h_left))
+        
+        # Create side-by-side stereo image
         stereo_sbs = np.hstack((left_view, right_view))
         
-        # Save if output path provided
-        if output_path:
-            # Apply PNG compression for best quality
-            if output_path.lower().endswith('.png'):
-                compression_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]  # 0 = no compression
-                cv2.imwrite(output_path, stereo_sbs, compression_params)
-            else:
-                cv2.imwrite(output_path, stereo_sbs)
+        # Apply dithering if enabled
+        if hasattr(self, 'apply_dithering') and self.apply_dithering:
+            stereo_sbs = self._apply_dithering(stereo_sbs)
         
-        return stereo_sbs, left_view, right_view, depth_map
+        # Save output if path is provided
+        if output_path is not None:
+            print(f"Saving output to {output_path}...")
+            cv2.imwrite(output_path, stereo_sbs)
+            
+        return stereo_sbs, depth_map
     
     def visualize_depth(self, depth_map):
         """Create a colored visualization of the depth map"""
@@ -1530,124 +2116,80 @@ class StereogramSBS3DConverter:
     
     def inpaint_diffusion(self, img_pil, mask_pil, steps=20, guidance_scale=7.5, 
                         patch_size=128, patch_overlap=32, high_quality=True):
-        """Use Stable Diffusion inpainting to fill missing areas"""
+        """
+        Apply Stable Diffusion inpainting to the image.
+        
+        This breaks down large images into patches and processes them efficiently.
+        
+        Args:
+            img_pil: PIL image to inpaint
+            mask_pil: PIL mask image (white = areas to inpaint)
+            steps: Number of denoising steps for SD inpainting
+            guidance_scale: How closely to follow the prompt
+            patch_size: Size of patches to process (smaller = less VRAM but lower quality)
+            patch_overlap: How much patches should overlap (higher = smoother transitions)
+            high_quality: Whether to use higher quality settings
+            
+        Returns:
+            Inpainted PIL image
+        """
         try:
-            # Import here to avoid circular imports
+            # Implement the patch-based inpainting logic...
+            from diffusers import StableDiffusionInpaintPipeline
             import torch
             
-            if self.inpaint_model is None:
-                print("Inpainting model not available. Make sure to initialize with use_advanced_infill=True")
-                return np.array(img_pil)
+            # Convert inputs to RGB (in case mask is grayscale)
+            img_rgb = img_pil.convert("RGB")
+            mask_rgb = mask_pil.convert("RGB")
             
-            # Convert PIL images to numpy arrays and ensure they're in the right format
-            img_np = np.array(img_pil)
-            mask_np = np.array(mask_pil)
+            # Resize images if they're too large for the model
+            orig_size = img_rgb.size
+            max_size = 2048  # Maximum size to process
             
-            # Ensure mask is black (0) for keep, white (255) for inpaint
-            if mask_np.max() <= 1:
-                mask_np = mask_np * 255
+            if img_rgb.width > max_size or img_rgb.height > max_size:
+                scale = max_size / max(img_rgb.width, img_rgb.height)
+                new_width = int(img_rgb.width * scale)
+                new_height = int(img_rgb.height * scale)
+                img_rgb = img_rgb.resize((new_width, new_height), Image.LANCZOS)
+                mask_rgb = mask_rgb.resize((new_width, new_height), Image.NEAREST)
             
-            # Check if we need to actually inpaint anything
-            if mask_np.max() == 0:
-                return img_np  # Nothing to inpaint
+            # Create patch-based inpainting
+            from core.patch_inpainting import patch_inpaint
             
-            # Check for small patches that can be efficiently filled
-            total_pixels = mask_np.size
-            mask_pixels = np.sum(mask_np > 0)
-            mask_percentage = mask_pixels / total_pixels * 100
-            
-            # If very small area to inpaint (less than 0.2%), use basic inpainting
-            if mask_percentage < 0.2:
-                print(f"Small mask area ({mask_percentage:.2f}%), using basic inpainting")
-                mask_cv = mask_np.astype(np.uint8)
-                from_cv = cv2.inpaint(img_np, mask_cv, 3, cv2.INPAINT_TELEA)
-                return from_cv
-            
-            # For MPS compatibility, we need to be careful with device handling
-            using_mps = torch.backends.mps.is_available()
-            
-            # Determine device for inpainting
-            if using_mps:
-                # For MPS, check the current state of the model
-                current_device = next(self.inpaint_model.unet.parameters()).device
-                print(f"Current inpainting model device: {current_device}")
-                
-                if str(current_device) == "cpu":
-                    print("Inpainting model is on CPU, keeping it there for stability")
-                    infer_device = "cpu"
-                else:
-                    print("Using MPS for inpainting")
-                    infer_device = "mps"
+            # Determine device
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch, 'mps') and torch.backends.mps.is_available():
+                device = torch.device("mps")
             else:
-                # Use whatever device was configured
-                infer_device = self.device
+                device = torch.device("cpu")
+                
+            # Adjust patch settings based on image size
+            img_size = max(img_rgb.width, img_rgb.height)
+            if img_size < 512:
+                # For small images, use larger patches for better coherence
+                patch_size = min(patch_size, img_size)
+                patch_overlap = min(patch_overlap, patch_size // 2)
             
-            # Create prompt for inpainting
-            # Empty prompt works fine for structural inpainting
-            prompt = "a high-resolution colorful image"
+            # Call the patch inpainting function
+            result = patch_inpaint(
+                self.inpaint_model,
+                img_rgb,
+                mask_rgb,
+                prompt="a realistic image with natural texture",
+                device=device,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                patch_size=patch_size,
+                patch_overlap=patch_overlap,
+                high_quality=high_quality
+            )
             
-            try:
-                # Setup the inpainting parameters
-                pil_img = Image.fromarray(img_np)
-                pil_mask = Image.fromarray(mask_np)
+            # Resize back to original size if needed
+            if result.size != orig_size:
+                result = result.resize(orig_size, Image.LANCZOS)
                 
-                # Set image guidance scale
-                self.inpaint_model.set_progress_bar_config(disable=True)
-                
-                # Try inpainting with error handling
-                try:
-                    # For inference, make sure model is on the right device
-                    if using_mps and infer_device == "mps":
-                        # Special handling for MPS
-                        self.inpaint_model.to("mps")
-                    
-                    print(f"Running inpainting on device: {infer_device}")
-                    img_inpainted = self.inpaint_model(
-                        prompt=prompt,
-                        image=pil_img,
-                        mask_image=pil_mask,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance_scale
-                    ).images[0]
-                    
-                except RuntimeError as e:
-                    error_msg = str(e)
-                    print(f"Error during inpainting: {error_msg}")
-                    
-                    if "Input type" in error_msg and "weight type" in error_msg and using_mps:
-                        print("MPS tensor type mismatch, falling back to CPU")
-                        # Move model to CPU and retry
-                        self.inpaint_model.to("cpu")
-                        
-                        img_inpainted = self.inpaint_model(
-                            prompt=prompt,
-                            image=pil_img,
-                            mask_image=pil_mask,
-                            num_inference_steps=steps,
-                            guidance_scale=guidance_scale
-                        ).images[0]
-                    elif "CUDA out of memory" in error_msg:
-                        # Handle out of VRAM error
-                        print("CUDA out of memory. Using basic inpainting instead")
-                        mask_cv = mask_np.astype(np.uint8)
-                        from_cv = cv2.inpaint(img_np, mask_cv, 3, cv2.INPAINT_TELEA)
-                        return from_cv
-                    else:
-                        # Other runtime error - re-raise
-                        raise
-                
-                # Convert to numpy and return
-                inpaint_result = np.array(img_inpainted)
-                return inpaint_result
-                
-            except Exception as e:
-                print(f"Error during diffusion inpainting: {e}")
-                import traceback
-                traceback.print_exc()
-                print("Falling back to basic inpainting")
-                mask_cv = mask_np.astype(np.uint8)
-                from_cv = cv2.inpaint(img_np, mask_cv, 3, cv2.INPAINT_TELEA)
-                return from_cv
+            return result
                 
         except Exception as e:
             print(f"Critical error in inpainting: {e}")
@@ -1661,4 +2203,69 @@ class StereogramSBS3DConverter:
         self.high_color_quality = high_color_quality
         self.apply_dithering = apply_dithering
         self.dithering_level = dithering_level
-        return self 
+        return self
+
+    def smooth_depth_edges(self, depth_map, edge_smoothness=1.0):
+        """
+        Apply advanced edge smoothing to a depth map to reduce harsh transitions
+        
+        Args:
+            depth_map: Depth map (0-1 range)
+            edge_smoothness: Controls the smoothness of transitions at depth boundaries (0.5-2.0)
+            
+        Returns:
+            Smoothed depth map
+        """
+        # Ensure depth map is in 0-1 range
+        if depth_map.max() > 1.0:
+            normalized_depth = depth_map / depth_map.max()
+        else:
+            normalized_depth = depth_map.copy()
+        
+        # Detect edges in the depth map
+        depth_edges = cv2.Canny(
+            (normalized_depth * 255).astype(np.uint8), 
+            threshold1=10, 
+            threshold2=50
+        )
+        
+        # Create a mask around depth edges for special treatment
+        edge_mask = cv2.dilate(
+            depth_edges, 
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), 
+            iterations=int(edge_smoothness * 2)
+        ).astype(bool)
+        
+        # Apply bilateral filtering to preserve depth discontinuities while smoothing
+        smoothed_depth = cv2.bilateralFilter(
+            normalized_depth, 
+            d=int(9 * edge_smoothness),  # Diameter of pixel neighborhood
+            sigmaColor=0.1,  # Filter sigma in color space
+            sigmaSpace=int(7 * edge_smoothness)  # Filter sigma in coordinate space
+        )
+        
+        # Apply additional Gaussian smoothing with larger kernel at the edges
+        if edge_smoothness > 0.5:
+            # Create a smoothed version for edge areas
+            edge_smoothed = cv2.GaussianBlur(
+                normalized_depth, 
+                (int(7 * edge_smoothness) | 1, int(7 * edge_smoothness) | 1),  # Ensure odd kernel size
+                0
+            )
+            
+            # Blend original with smoothed version at the edges
+            blend_factor = np.minimum(1.0, edge_smoothness / 1.5)
+            smoothed_depth[edge_mask] = (
+                smoothed_depth[edge_mask] * (1 - blend_factor) + 
+                edge_smoothed[edge_mask] * blend_factor
+            )
+        
+        # Apply a final gradient-preserving filter
+        final_smoothed = cv2.bilateralFilter(
+            smoothed_depth,
+            d=int(5 * edge_smoothness),
+            sigmaColor=0.05,
+            sigmaSpace=int(5 * edge_smoothness)
+        )
+        
+        return final_smoothed
