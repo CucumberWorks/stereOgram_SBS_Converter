@@ -73,12 +73,12 @@ TRANSLATIONS = {
 # Blur configuration parameters - centralized for easy adjustment
 BLUR_CONFIG = {
     # Default initial values
-    "DEFAULT_BLUR_STRENGTH": 1.6,      # Default blur strength
+    "DEFAULT_BLUR_STRENGTH": 1.3,      # Default blur strength
     "DEFAULT_MAX_BLUR_SIZE": 35,       # Default max blur kernel size (must be odd number)
-    "DEFAULT_FOCAL_THICKNESS": 0.2,   # Default focal plane thickness (smaller = narrower focus)
-    "DEFAULT_APERTURE_SHAPE": "circle", # Shape of bokeh (circle, hexagon, octagon)
+    "DEFAULT_FOCAL_THICKNESS": 0.25,   # Default focal plane thickness (smaller = narrower focus)
+    "DEFAULT_APERTURE_SHAPE": "octagon", # Shape of bokeh (circle, hexagon, octagon)
     "DEFAULT_HIGHLIGHT_BOOST": 1.5,    # Default highlight boost factor
-    "DEFAULT_EDGE_SMOOTHNESS": 1.0,    # Default edge smoothness factor
+    "DEFAULT_EDGE_SMOOTHNESS": 2.0,    # Default edge smoothness factor
     "DEFAULT_CHROMATIC_ABERRATION": 0.0, # Default chromatic aberration (0 = disabled)
     "DEFAULT_ENABLE_DITHERING": True,  # Enable dithering by default to prevent banding
     
